@@ -12,14 +12,16 @@ void setState(State newState) {
   state = newState;
   switch (state) {
     case LOCKED:
+      Serial.println("[LOCK] Relay engaging — fridge is LOCKED");
+      Serial.flush();
       digitalWrite(RELAY_PIN, HIGH);
-      Serial.println("[LOCK] Relay engaged — fridge is LOCKED");
       break;
     case UNLOCKED:
-      digitalWrite(RELAY_PIN, LOW);
       doorOpenedWhileUnlocked = false;
-      Serial.println("[LOCK] Relay released — fridge is UNLOCKED");
+      Serial.println("[LOCK] Relay releasing — fridge is UNLOCKED");
       Serial.println("[LOCK] Open the door, then close it to relock.");
+      Serial.flush();
+      digitalWrite(RELAY_PIN, LOW);
       break;
   }
 }
