@@ -1,18 +1,17 @@
 #include <Arduino.h>
 
-// put function declarations here:
-int myFunction(int, int);
+const int RELAY_PIN = 26;
+const int DOOR_PIN = 27;
 
 void setup() {
-  // put your setup code here, to run once:
-  int result = myFunction(2, 3);
+  Serial.begin(115200);
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH);  // relay off at start
+  pinMode(DOOR_PIN, INPUT_PULLUP);
+  Serial.println("Phase 1 Stage 3 test starting.");
 }
-
 void loop() {
-  // put your main code here, to run repeatedly:
-}
-
-// put function definitions here:
-int myFunction(int x, int y) {
-  return x + y;
+  bool doorClosed = (digitalRead(DOOR_PIN) == LOW);
+  Serial.println(doorClosed ? "Door: CLOSED" : "Door: OPEN");
+  delay(500);
 }
