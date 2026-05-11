@@ -12,16 +12,17 @@ void setState(State newState) {
   state = newState;
   switch (state) {
     case LOCKED:
-      Serial.println("[LOCK] Relay engaging — fridge is LOCKED");
-      Serial.flush();
-      digitalWrite(RELAY_PIN, HIGH);
-      break;
-    case UNLOCKED:
-      doorOpenedWhileUnlocked = false;
-      Serial.println("[LOCK] Relay releasing — fridge is UNLOCKED");
-      Serial.println("[LOCK] Open the door, then close it to relock.");
+      Serial.println("[LOCK] Relay engaging -- fridge is LOCKED");
       Serial.flush();
       digitalWrite(RELAY_PIN, LOW);
+      doorOpenedWhileUnlocked = false;
+      break;
+    case UNLOCKED:
+      Serial.println("[LOCK] Relay releasing -- fridge is UNLOCKED");
+      Serial.println("[LOCK] Open the door, then close it to relock.");
+      Serial.flush();
+      digitalWrite(RELAY_PIN, HIGH);
+      doorOpenedWhileUnlocked = false;
       break;
   }
 }
@@ -29,7 +30,7 @@ void setState(State newState) {
 void setup() {
   Serial.begin(115200);
   Serial.println("----------------------------------------");
-  Serial.println("  Onigiri Fridge Phase 1 — booting...");
+  Serial.println("  Onigiri Fridge Phase 1 -- booting...");
   Serial.println("----------------------------------------");
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(DOOR_PIN, INPUT_PULLUP);
@@ -54,21 +55,31 @@ void loop() {
 
   if (Serial.available()) {
     char c = Serial.read();
-    if (c == 'u') {
+    if (c == '\n' || c == '\r') {
+      // ignore newlines
+    } else if (c == 'u') {
       if (state == LOCKED) {
         setState(UNLOCKED);
       } else {
-        Serial.println("[CMD]  Already unlocked — close the door to relock.");
+        Serial.println("[CMD]  Already unlocked -- close the door to relock.");
       }
     } else {
       Serial.print("[CMD]  Unknown command: '");
       Serial.print(c);
-      Serial.println("' — send 'u' to unlock.");
+      Serial.println("' -- send 'u' to unlock.");
     }
   }
 
   if (state == UNLOCKED) {
-    if (!doorClosed) doorOpenedWhileUnlocked = true;
-    if (doorOpenedWhileUnlocked && doorClosed) setState(LOCKED);
+    if (!doorClosed) {
+      if (!doorOpenedWhileUnlocked) {
+        Serial.println("[DOOR] Door opened while unlocked -- will relock on close.");
+        doorOpenedWhileUnlocked = true;
+      }
+    }
+    if (doorOpenedWhileUnlocked && doorClosed) {
+      Serial.println("[LOCK] Door closed after opening -- relocking.");
+      setState(LOCKED);
+    }
   }
 }
