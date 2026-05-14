@@ -83,9 +83,17 @@ Log lines are prefixed by subsystem: `[LOCK]`, `[WIFI]`, `[MQTT]`, `[DOOR]`, `[C
 ## Repository Structure
 
 ```
-src/main.cpp       # All firmware logic
-platformio.ini     # Build, upload, and monitor configuration
-include/           # Reserved for future header files
-lib/               # Reserved for local libraries
-test/              # Reserved for unit tests
+onigiri-fridge-phase1/
+├── src/
+│   └── main.cpp          # All firmware logic
+├── include/              # Reserved for future header files
+│   └── README
+├── lib/                  # Reserved for local libraries
+│   └── README
+├── test/                 # Reserved for unit tests
+│   └── README
+├── platformio.ini        # Build, upload, and monitor configuration
+├── .gitignore
+├── .gitattributes
+└── README.md
 ```
