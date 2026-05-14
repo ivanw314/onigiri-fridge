@@ -30,7 +30,7 @@ async function squareFetch(path, options = {}) {
 }
 
 // ── createPaymentLink ─────────────────────────────────────────────────────────
-// Creates a Square Quick Pay hosted checkout URL.
+// Creates a Square hosted checkout URL.
 // order_id is stored as reference_id on the Square order so we can
 // correlate the webhook back to our internal order.
 //
@@ -43,16 +43,20 @@ async function createPaymentLink({ order_id, amount_cents, item_name, redirect_u
   const data = await squareFetch('/v2/online-checkout/payment-links', {
     method: 'POST',
     body: JSON.stringify({
-      idempotency_key: order_id, // safe to retry with same key
-      quick_pay: {
-        name:         item_name || 'Onigiri',
-        price_money:  { amount: amount_cents, currency: 'USD' },
-        location_id:  SQUARE_LOCATION_ID,
-      },
+      idempotency_key: order_id,
       order: {
-        // reference_id threads our internal order_id through Square so we
-        // can look it up when the webhook fires.
+        location_id:  SQUARE_LOCATION_ID,
         reference_id: order_id,
+        line_items: [
+          {
+            name:     item_name || 'Onigiri',
+            quantity: '1',
+            base_price_money: {
+              amount:   amount_cents,
+              currency: 'USD',
+            },
+          },
+        ],
       },
       checkout_options: {
         redirect_url,
