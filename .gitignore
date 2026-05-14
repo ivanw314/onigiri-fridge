@@ -4,3 +4,7 @@
 .vscode/launch.json
 .vscode/ipch
 .DS_Store
+
+# Backend
+backend/node_modules/
+backend/.env
