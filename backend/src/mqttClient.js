@@ -35,7 +35,7 @@ async function connectMQTT() {
     password: HIVEMQ_PASSWORD,
     clientId: `backend-${uuidv4()}`,
     reconnectPeriod: 5000,
-    rejectUnauthorized: true, // HiveMQ Cloud has a valid CA-signed cert
+    rejectUnauthorized: true,
   });
 
   return new Promise((resolve, reject) => {
@@ -48,7 +48,6 @@ async function connectMQTT() {
       clearTimeout(timeout);
       console.log('[MQTT] Connected to broker');
 
-      // Subscribe to all device events and status topics
       client.subscribe('fridge/+/evt',    { qos: 1 });
       client.subscribe('fridge/+/status', { qos: 0 });
 
@@ -70,24 +69,15 @@ async function connectMQTT() {
 // ── Incoming message handler ──────────────────────────────────────────────────
 
 function handleMessage(topic, rawPayload) {
-  // topic shape: fridge/{device_id}/{type}
   const parts = topic.split('/');
   if (parts.length !== 3 || parts[0] !== 'fridge') return;
 
   const [, device_id, type] = parts;
 
-  let data;
-  try {
-    data = JSON.parse(rawPayload.toString());
-  } catch {
-    // Plain string payload (e.g. "unlocked", "offline")
-    data = { event: rawPayload.toString() };
-  }
-
   if (type === 'status') {
     deviceHeartbeats.set(device_id, new Date());
-    const state = data.state || data.event || data;
-    if (state === 'offline') {
+    const raw = rawPayload.toString();
+    if (raw === 'offline') {
       console.warn(`[MQTT] Device ${device_id} went offline`);
     } else {
       console.log(`[MQTT] Heartbeat from ${device_id}`);
@@ -96,9 +86,26 @@ function handleMessage(topic, rawPayload) {
   }
 
   if (type === 'evt') {
-    // Normalise: firmware may send a plain string or {event, order_id, ...}
-    const event    = data.event || (typeof data === 'string' ? data : null);
-    const order_id = data.order_id || null;
+    const raw = rawPayload.toString();
+    let event    = null;
+    let order_id = null;
+
+    try {
+      // Firmware may eventually publish JSON: { event, order_id }
+      const parsed = JSON.parse(raw);
+      event    = parsed.event    ?? parsed.evt ?? null;
+      order_id = parsed.order_id ?? null;
+    } catch {
+      // Current Phase 2 firmware publishes plain strings: "unlocked", "door_closed", etc.
+      event = raw;
+    }
+
+    if (!event) {
+      // Log the raw payload so we can see exactly what the firmware sent
+      console.warn(`[MQTT] Unrecognised evt payload from ${device_id}: ${raw}`);
+      return;
+    }
+
     console.log(`[MQTT] Event from ${device_id}: ${event}`, order_id ? `(order ${order_id})` : '');
     emitter.emit('deviceEvent', { device_id, event, order_id });
   }
@@ -114,7 +121,6 @@ function publishUnlock(device_id, order_id) {
   const secret = process.env.DEVICE_SECRET;
   if (!secret) throw new Error('DEVICE_SECRET env var not set');
 
-  // Build payload, sign it, then add sig
   const payload = {
     cmd:      'unlock',
     order_id,
@@ -129,14 +135,10 @@ function publishUnlock(device_id, order_id) {
     { qos: 1 }
   );
 
-  // Track which order is pending on this device so events can be correlated
   pendingOrders.set(device_id, order_id);
-
   console.log(`[MQTT] Published unlock → ${device_id} / order ${order_id}`);
 }
 
-// HMAC-SHA256 over a canonical (key-sorted) JSON serialisation of the payload.
-// The firmware verifies the same way. sig field is excluded before signing.
 function signPayload(payload, secret) {
   const { sig: _omit, ...rest } = payload;
   const canonical = JSON.stringify(
@@ -147,8 +149,6 @@ function signPayload(payload, secret) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-// Returns true if the device has sent a heartbeat within maxAgeMs (default 90s).
-// The ESP32 heartbeats every 30s; 90s gives three missed beats before "offline".
 function isDeviceOnline(device_id, maxAgeMs = 90_000) {
   const last = deviceHeartbeats.get(device_id);
   if (!last) return false;
