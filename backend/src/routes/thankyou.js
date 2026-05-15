@@ -5,10 +5,6 @@ const router = Router();
 
 const ITEM_NAME = () => process.env.ITEM_NAME || 'Onigiri';
 
-// GET /thank-you?order_id=xxx
-// Square redirects here after a successful payment.
-// The page opens an SSE stream to /api/orders/:order_id/status and
-// shows "Open the door!" as soon as the device reports unlocked.
 router.get('/', (req, res) => {
   const { order_id } = req.query;
   if (!order_id) return res.redirect('/');
@@ -45,7 +41,6 @@ router.get('/', (req, res) => {
     .open    { color: #1a7a1a; font-weight: 700; font-size: 1.3rem; }
     .done    { color: #555; }
     .err     { color: #c00; }
-    /* Spinner */
     .spinner {
       width: 2rem; height: 2rem;
       border: 3px solid #e0e0e0;
@@ -69,50 +64,53 @@ router.get('/', (req, res) => {
     const ORDER_ID  = "${order_id}";
     const ITEM_NAME = "${ITEM_NAME()}";
     const statusEl  = document.getElementById('status');
+    let done = false;
 
     function setStatus(html) {
       statusEl.innerHTML = html;
     }
 
     function applyStatus(status) {
+      if (done) return;
       switch (status) {
         case 'dispensing':
         case 'unlocked':
+          done = true;
+          evtSource.close();
           setStatus('<span class="open">🔓 Open the fridge door now!</span>');
           break;
         case 'complete':
+          done = true;
+          evtSource.close();
           setStatus('<span class="done">Enjoy your ' + ITEM_NAME + '! 🍙</span>');
           break;
         case 'refunded':
+          done = true;
+          evtSource.close();
           setStatus('<span class="err">Something went wrong &#8212; you&#39;ll be refunded automatically.</span>');
           break;
-        // pending / paid: keep spinner
       }
     }
 
-    // ── SSE stream ──────────────────────────────────────────────────────────
     const evtSource = new EventSource('/api/orders/' + ORDER_ID + '/status');
 
     evtSource.onmessage = (e) => {
       const { status } = JSON.parse(e.data);
       applyStatus(status);
-      if (['dispensing', 'unlocked', 'complete', 'refunded'].includes(status)) {
-        evtSource.close();
-      }
     };
 
     evtSource.onerror = () => {
-      evtSource.close();
-      // SSE died — fall back to a single poll
+      // Don't close — browser will auto-reconnect SSE.
+      // Poll once as a safety net in case we missed an event while disconnected.
       fetch('/api/orders/' + ORDER_ID + '/status/poll')
         .then(r => r.json())
         .then(({ status }) => applyStatus(status))
-        .catch(() => {}); // swallow; stale UI is fine here
+        .catch(() => {});
     };
 
-    // Soft timeout: encourage patience after 30s without a terminal state
+    // After 30s show a patience message but keep listening
     setTimeout(() => {
-      if (statusEl.querySelector('.spinner')) {
+      if (!done) {
         setStatus('<span>Taking a little longer than usual… please wait.</span>');
       }
     }, 30_000);
