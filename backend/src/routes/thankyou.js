@@ -75,8 +75,7 @@ router.get('/', (req, res) => {
       switch (status) {
         case 'dispensing':
         case 'unlocked':
-          done = true;
-          evtSource.close();
+          // Don't close yet — wait for complete
           setStatus('<span class="open">🔓 Open the fridge door now!</span>');
           break;
         case 'complete':
