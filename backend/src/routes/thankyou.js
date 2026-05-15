@@ -66,8 +66,8 @@ router.get('/', (req, res) => {
   </div>
 
   <script>
-    const ORDER_ID  = ${JSON.stringify(order_id)};
-    const ITEM_NAME = ${JSON.stringify(ITEM_NAME())};
+    const ORDER_ID  = "${order_id}";
+    const ITEM_NAME = "${ITEM_NAME()}";
     const statusEl  = document.getElementById('status');
 
     function setStatus(html) {
@@ -84,7 +84,7 @@ router.get('/', (req, res) => {
           setStatus('<span class="done">Enjoy your ' + ITEM_NAME + '! 🍙</span>');
           break;
         case 'refunded':
-          setStatus('<span class="err">Something went wrong — you\'ll be refunded automatically.</span>');
+          setStatus('<span class="err">Something went wrong &#8212; you&#39;ll be refunded automatically.</span>');
           break;
         // pending / paid: keep spinner
       }
