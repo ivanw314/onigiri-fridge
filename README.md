@@ -85,14 +85,28 @@ Log lines are prefixed by subsystem: `[LOCK]`, `[WIFI]`, `[MQTT]`, `[DOOR]`, `[C
 ```
 onigiri-fridge-phase1/
 ├── src/
-│   └── main.cpp          # All firmware logic
-├── include/              # Reserved for future header files
-│   └── README
-├── lib/                  # Reserved for local libraries
-│   └── README
-├── test/                 # Reserved for unit tests
-│   └── README
-├── platformio.ini        # Build, upload, and monitor configuration
+│   └── main.cpp                    # ESP32 firmware
+├── include/                        # Reserved for future header files
+├── lib/                            # Reserved for local libraries
+├── test/                           # Reserved for unit tests
+├── platformio.ini                  # Firmware build & upload config
+│
+├── backend/
+│   ├── src/
+│   │   ├── index.js                # Express entry point + MQTT device event handler
+│   │   ├── mqttClient.js           # HiveMQ TLS connection, publishUnlock (HMAC-SHA256), heartbeat tracking
+│   │   ├── orderStore.js           # In-memory order store + SSE client management
+│   │   ├── square.js               # createPaymentLink, getSquareOrder
+│   │   └── routes/
+│   │       ├── buy.js              # GET /buy/:device_id — landing page with online/offline guard
+│   │       ├── checkout.js         # POST /api/checkout — create order + Square payment link
+│   │       ├── orders.js           # GET /api/orders/:id/status — SSE stream + poll fallback
+│   │       ├── thankyou.js         # GET /thank-you — post-payment page, SSEs for unlock event
+│   │       └── webhook.js          # POST /webhooks/square — HMAC verify, dedup, trigger unlock
+│   ├── package.json
+│   ├── railway.toml                # Railway hosting config
+│   └── .env.example
+│
 ├── .gitignore
 ├── .gitattributes
 └── README.md

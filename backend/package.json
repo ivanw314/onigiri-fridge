@@ -1,0 +1,16 @@
+{
+  "name": "onigiri-backend",
+  "version": "1.0.0",
+  "description": "Backend for WiFi-controlled vending fridge",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.1",
+    "express": "^4.18.2",
+    "mqtt": "^5.3.4",
+    "uuid": "^9.0.0"
+  }
+}
