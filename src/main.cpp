@@ -5,7 +5,8 @@
 #include "secrets.h"
 
 // ── constants (not secrets) ───────────────────────────────────
-const int MQTT_PORT = 8883;
+const int   MQTT_PORT       = 8883;
+const int   RELOCK_DELAY_MS = 1500;  // ms to wait after door close before locking
 // ─────────────────────────────────────────────────────────────
 
 const int RELAY_PIN = 26;
@@ -181,8 +182,17 @@ void loop() {
       doorOpenedWhileUnlocked = true;
     }
     if (doorOpenedWhileUnlocked && doorClosed) {
-      Serial.println("[LOCK] Door closed after opening -- relocking.");
-      setState(LOCKED);
+      Serial.println("[LOCK] Door closed -- waiting for relock delay.");
+      delay(RELOCK_DELAY_MS);
+      // Re-check door is still closed after the delay
+      doorClosed = (digitalRead(DOOR_PIN) == LOW);
+      if (doorClosed) {
+        Serial.println("[LOCK] Relocking.");
+        setState(LOCKED);
+      } else {
+        Serial.println("[LOCK] Door reopened during delay -- waiting.");
+        // doorOpenedWhileUnlocked remains true; will retry on next close
+      }
     }
   }
 
