@@ -80,4 +80,24 @@ async function getSquareOrder(square_order_id) {
   return data.order; // { id, reference_id, state, ... }
 }
 
-module.exports = { createPaymentLink, getSquareOrder };
+// ── createRefund ──────────────────────────────────────────────────────────────
+// Issues a full refund for a completed Square payment.
+// Called when an order transitions to 'refunded' after a failed or timed-out unlock.
+
+async function createRefund({ payment_id, order_id }) {
+  const amount_cents = parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
+  return squareFetch('/v2/refunds', {
+    method: 'POST',
+    body: JSON.stringify({
+      idempotency_key: `refund-${order_id}`,
+      payment_id,
+      reason: 'Unlock timeout — item not dispensed',
+      amount_money: {
+        amount:   amount_cents,
+        currency: 'USD',
+      },
+    }),
+  });
+}
+
+module.exports = { createPaymentLink, getSquareOrder, createRefund };

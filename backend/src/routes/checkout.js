@@ -25,7 +25,7 @@ router.post('/', async (req, res) => {
   }
 
   // 1. Create our internal order (status: pending)
-  const order = createOrder({ device_id });
+  const order = await createOrder({ device_id });
 
   // 2. Build the Square payment link
   const BASE_URL      = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
@@ -42,7 +42,7 @@ router.post('/', async (req, res) => {
     });
 
     // Attach the Square order ID so the webhook handler can match it back
-    updateOrder(order.id, { square_order_id });
+    await updateOrder(order.id, { square_order_id });
 
     return res.json({ checkout_url, order_id: order.id });
 
@@ -50,7 +50,7 @@ router.post('/', async (req, res) => {
     console.error('[CHECKOUT] Square error:', err.message);
     // Don't leave a dangling pending order — mark it refunded
     // (no payment was taken, so no actual refund needed, just state cleanup)
-    updateOrder(order.id, { status: 'refunded' });
+    await updateOrder(order.id, { status: 'refunded' });
     return res.status(502).json({ error: 'Could not create checkout. Please try again.' });
   }
 });

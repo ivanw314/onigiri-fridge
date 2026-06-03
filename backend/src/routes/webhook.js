@@ -2,7 +2,7 @@
 const crypto = require('crypto');
 const { Router } = require('express');
 const { getOrder, updateOrder, isDuplicateEvent } = require('../orderStore');
-const { getSquareOrder } = require('../square');
+const { getSquareOrder, createRefund } = require('../square');
 const { publishUnlock } = require('../mqttClient');
 
 const router = Router();
@@ -41,7 +41,7 @@ router.post('/square', async (req, res) => {
 
   // 5. Deduplicate — Square retries delivery, so the same event_id can arrive
   //    multiple times. Process it exactly once.
-  if (isDuplicateEvent(event_id)) {
+  if (await isDuplicateEvent(event_id)) {
     console.log(`[WEBHOOK] Duplicate event_id ${event_id} — skipping`);
     return;
   }
@@ -66,7 +66,7 @@ router.post('/square', async (req, res) => {
     return;
   }
 
-  const order = getOrder(order_id);
+  const order = await getOrder(order_id);
   if (!order) {
     console.warn(`[WEBHOOK] Unknown order_id ${order_id}`);
     return;
@@ -79,7 +79,7 @@ router.post('/square', async (req, res) => {
   }
 
   // 7. Mark paid and publish the MQTT unlock command
-  updateOrder(order_id, {
+  await updateOrder(order_id, {
     status:            'paid',
     square_payment_id: payment.id,
     square_order_id:   payment.order_id,
@@ -91,8 +91,17 @@ router.post('/square', async (req, res) => {
     // (handled in index.js via the MQTT emitter).
   } catch (err) {
     console.error(`[WEBHOOK] Failed to publish unlock for ${order_id}:`, err.message);
-    // TODO Phase 3: queue for retry; refund if device unreachable after N minutes
-    updateOrder(order_id, { status: 'refunded' });
+    await updateOrder(order_id, { status: 'refunded' });
+    if (payment.id) {
+      try {
+        await createRefund({ payment_id: payment.id, order_id });
+        console.log(`[REFUND] Square refund issued for order ${order_id}`);
+      } catch (refundErr) {
+        console.error(`[REFUND] Square refund failed for order ${order_id}:`, refundErr.message);
+      }
+    } else {
+      console.warn(`[REFUND] No payment_id for order ${order_id} — skipping Square refund`);
+    }
   }
 });
 

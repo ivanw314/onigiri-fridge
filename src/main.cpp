@@ -2,6 +2,9 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
+#include <ArduinoJson.h>
+#include "mbedtls/md.h"
+#include <time.h>
 #include "secrets.h"
 
 // ── constants (not secrets) ───────────────────────────────────
@@ -27,6 +30,49 @@ bool doorOpenedWhileUnlocked = false;
 unsigned long lastHeartbeat       = 0;
 const unsigned long HEARTBEAT_MS  = 30000;
 
+// ── Nonce ring buffer ─────────────────────────────────────────
+// Keeps the last NONCE_RING_SIZE nonces to detect replays.
+#define NONCE_RING_SIZE 8
+static char seenNonces[NONCE_RING_SIZE][37];  // UUID: 36 chars + NUL
+static int  nonceCursor = 0;
+
+static bool isNonceSeen(const char* nonce) {
+  for (int i = 0; i < NONCE_RING_SIZE; i++) {
+    if (seenNonces[i][0] != '\0' && strcmp(seenNonces[i], nonce) == 0)
+      return true;
+  }
+  return false;
+}
+
+static void recordNonce(const char* nonce) {
+  strncpy(seenNonces[nonceCursor], nonce, 36);
+  seenNonces[nonceCursor][36] = '\0';
+  nonceCursor = (nonceCursor + 1) % NONCE_RING_SIZE;
+}
+
+// ── HMAC-SHA256 ───────────────────────────────────────────────
+// Returns true if HMAC-SHA256(key, message) produces the expected hex string.
+static bool verifyHMAC(const char* message, const char* key, const char* expected) {
+  uint8_t hmacBytes[32];
+  mbedtls_md_context_t ctx;
+  mbedtls_md_init(&ctx);
+  const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  if (!info || mbedtls_md_setup(&ctx, info, 1) != 0) {
+    mbedtls_md_free(&ctx);
+    return false;
+  }
+  mbedtls_md_hmac_starts(&ctx, (const uint8_t*)key, strlen(key));
+  mbedtls_md_hmac_update(&ctx, (const uint8_t*)message, strlen(message));
+  mbedtls_md_hmac_finish(&ctx, hmacBytes);
+  mbedtls_md_free(&ctx);
+
+  char computed[65];
+  for (int i = 0; i < 32; i++) sprintf(computed + i * 2, "%02x", hmacBytes[i]);
+  computed[64] = '\0';
+
+  return strcmp(computed, expected) == 0;
+}
+
 // ── lock state machine ────────────────────────────────────────
 void setState(State newState) {
   state = newState;
@@ -51,7 +97,7 @@ void setState(State newState) {
 
 // ── MQTT message handler ──────────────────────────────────────
 void onMqttMessage(char* topic, byte* payload, unsigned int length) {
-  char msg[256];
+  char msg[512];
   unsigned int len = min(length, (unsigned int)sizeof(msg) - 1);
   memcpy(msg, payload, len);
   msg[len] = '\0';
@@ -61,17 +107,66 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
   Serial.print(": ");
   Serial.println(msg);
 
-  // Simple string match -- no HMAC yet (Phase 3 adds that)
-  if (strstr(msg, "unlock") != NULL) {
-    if (state == LOCKED) {
-      Serial.println("[CMD]  Unlock command received via MQTT.");
-      setState(UNLOCKED);
-    } else {
-      Serial.println("[CMD]  Already unlocked.");
-      mqtt.publish(TOPIC_EVT, "{\"evt\":\"already_unlocked\"}");
-    }
-  } else {
+  // Parse JSON payload
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, msg);
+  if (err) {
+    Serial.println("[CMD]  JSON parse error -- ignoring.");
+    return;
+  }
+
+  const char* cmd      = doc["cmd"]      | "";
+  const char* order_id = doc["order_id"] | "";
+  const char* nonce    = doc["nonce"]    | "";
+  long        ts       = doc["ts"]       | 0L;
+  const char* sig      = doc["sig"]      | "";
+
+  if (strcmp(cmd, "unlock") != 0) {
     Serial.println("[CMD]  Unrecognised command -- ignored.");
+    return;
+  }
+
+  // 1. Timestamp freshness (only enforced after SNTP has synced)
+  time_t now = time(nullptr);
+  if (now > 1000000000L) {
+    long long diff = (long long)now - (long long)ts;
+    if (diff < -30LL || diff > 30LL) {
+      Serial.println("[AUTH] Stale timestamp -- rejected.");
+      mqtt.publish(TOPIC_EVT, "{\"evt\":\"auth_failed\"}");
+      return;
+    }
+  }
+
+  // 2. Nonce replay check
+  if (isNonceSeen(nonce)) {
+    Serial.println("[AUTH] Replayed nonce -- rejected.");
+    mqtt.publish(TOPIC_EVT, "{\"evt\":\"auth_failed\"}");
+    return;
+  }
+
+  // 3. HMAC-SHA256 verification
+  // Canonical form matches backend signPayload(): keys sorted alphabetically.
+  // Fields: cmd (string), nonce (string), order_id (string), ts (number)
+  char canonical[300];
+  snprintf(canonical, sizeof(canonical),
+    "{\"cmd\":\"%s\",\"nonce\":\"%s\",\"order_id\":\"%s\",\"ts\":%ld}",
+    cmd, nonce, order_id, ts);
+
+  if (!verifyHMAC(canonical, DEVICE_SECRET, sig)) {
+    Serial.println("[AUTH] HMAC mismatch -- rejected.");
+    mqtt.publish(TOPIC_EVT, "{\"evt\":\"auth_failed\"}");
+    return;
+  }
+
+  // All checks passed — record nonce and act
+  recordNonce(nonce);
+
+  if (state == LOCKED) {
+    Serial.println("[CMD]  Unlock command verified.");
+    setState(UNLOCKED);
+  } else {
+    Serial.println("[CMD]  Already unlocked.");
+    mqtt.publish(TOPIC_EVT, "{\"evt\":\"already_unlocked\"}");
   }
 }
 
@@ -87,6 +182,25 @@ void connectWifi() {
   Serial.println();
   Serial.print("[WIFI] Connected. IP: ");
   Serial.println(WiFi.localIP());
+}
+
+// ── NTP time sync ─────────────────────────────────────────────
+// Needed so timestamp freshness checks have a reference clock.
+void syncTime() {
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  Serial.print("[SNTP] Syncing time");
+  time_t now = 0;
+  for (int i = 0; i < 20 && now < 1000000000L; i++) {
+    delay(500);
+    now = time(nullptr);
+    Serial.print(".");
+  }
+  Serial.println();
+  if (now > 1000000000L) {
+    Serial.println("[SNTP] Time synced.");
+  } else {
+    Serial.println("[SNTP] Sync failed -- timestamp checks disabled.");
+  }
 }
 
 // ── MQTT connect (also sets Last Will) ───────────────────────
@@ -120,12 +234,14 @@ void connectMqtt() {
 void setup() {
   Serial.begin(115200);
   Serial.println("----------------------------------------");
-  Serial.println("  Onigiri Fridge Phase 2 -- booting...");
+  Serial.println("  Onigiri Fridge Phase 3 -- booting...");
   Serial.println("----------------------------------------");
 
   snprintf(TOPIC_CMD,    sizeof(TOPIC_CMD),    "fridge/%s/cmd",    DEVICE_ID);
   snprintf(TOPIC_EVT,    sizeof(TOPIC_EVT),    "fridge/%s/evt",    DEVICE_ID);
   snprintf(TOPIC_STATUS, sizeof(TOPIC_STATUS), "fridge/%s/status", DEVICE_ID);
+
+  memset(seenNonces, 0, sizeof(seenNonces));
 
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(DOOR_PIN,  INPUT_PULLUP);
@@ -138,8 +254,9 @@ void setup() {
   setState(LOCKED);
 
   connectWifi();
+  syncTime();
 
-  wifiClient.setInsecure();  // no cert pinning yet -- Phase 3 adds this
+  wifiClient.setInsecure();  // no cert pinning yet
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setCallback(onMqttMessage);
   mqtt.setBufferSize(512);

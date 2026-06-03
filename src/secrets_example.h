@@ -10,4 +10,5 @@ const char* MQTT_USER = "YOUR_HIVEMQ_USERNAME";
 const char* MQTT_PASS = "YOUR_HIVEMQ_PASSWORD";
 
 // Device
-const char* DEVICE_ID = "onigiri";
+const char* DEVICE_ID     = "onigiri";
+const char* DEVICE_SECRET = "YOUR_DEVICE_SECRET";

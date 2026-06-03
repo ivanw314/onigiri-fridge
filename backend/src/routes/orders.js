@@ -7,9 +7,9 @@ const router = Router();
 // GET /api/orders/:order_id/status
 // Server-Sent Events stream. The thank-you page connects here and receives
 // { status } events until the order reaches a terminal state.
-router.get('/:order_id/status', (req, res) => {
+router.get('/:order_id/status', async (req, res) => {
   const { order_id } = req.params;
-  const order = getOrder(order_id);
+  const order = await getOrder(order_id);
 
   if (!order) {
     return res.status(404).json({ error: 'Order not found' });
@@ -41,8 +41,8 @@ router.get('/:order_id/status', (req, res) => {
 
 // GET /api/orders/:order_id/status/poll
 // One-shot fallback used by the thank-you page when the SSE stream dies.
-router.get('/:order_id/status/poll', (req, res) => {
-  const order = getOrder(req.params.order_id);
+router.get('/:order_id/status/poll', async (req, res) => {
+  const order = await getOrder(req.params.order_id);
   if (!order) return res.status(404).json({ error: 'Order not found' });
   res.json({ status: order.status });
 });

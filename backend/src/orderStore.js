@@ -1,63 +1,91 @@
 'use strict';
+const { Pool } = require('pg');
 const { v4: uuidv4 } = require('uuid');
 
-// ── In-memory store ───────────────────────────────────────────────────────────
-// Replace with a database (Postgres via Railway, or SQLite) in Phase 3.
-// Order shape:
-//   { id, device_id, status, square_order_id, square_payment_id,
-//     created_at, updated_at }
-//
-// Status lifecycle:
-//   pending → paid → dispensing → complete
-//                              → refunded  (timeout or backend error)
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+});
 
-const orders   = new Map(); // order_id → order object
-const seenEventIds = new Set(); // Square event_id dedup
-
-// SSE response objects waiting for status updates on a given order_id
+// SSE response objects — ephemeral by nature, stays in-memory
 const sseClients = new Map(); // order_id → Set<res>
+
+// ── Schema init ───────────────────────────────────────────────────────────────
+
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS orders (
+      id                UUID PRIMARY KEY,
+      device_id         TEXT NOT NULL,
+      status            TEXT NOT NULL DEFAULT 'pending',
+      square_order_id   TEXT,
+      square_payment_id TEXT,
+      event_id          TEXT UNIQUE,
+      created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS seen_events (
+      event_id   TEXT PRIMARY KEY,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  console.log('[DB] Tables ready');
+}
 
 // ── CRUD ──────────────────────────────────────────────────────────────────────
 
-function createOrder({ device_id }) {
-  const order = {
-    id:                uuidv4(),
-    device_id,
-    status:            'pending',
-    square_order_id:   null,
-    square_payment_id: null,
-    created_at:        new Date().toISOString(),
-    updated_at:        new Date().toISOString(),
-  };
-  orders.set(order.id, order);
+async function createOrder({ device_id }) {
+  const id = uuidv4();
+  const { rows } = await pool.query(
+    `INSERT INTO orders (id, device_id, status, created_at, updated_at)
+     VALUES ($1, $2, 'pending', NOW(), NOW())
+     RETURNING *`,
+    [id, device_id]
+  );
+  const order = rows[0];
   console.log(`[ORDER] Created ${order.id} for device ${device_id}`);
   return order;
 }
 
-function getOrder(order_id) {
-  return orders.get(order_id) ?? null;
+async function getOrder(order_id) {
+  const { rows } = await pool.query(
+    'SELECT * FROM orders WHERE id = $1',
+    [order_id]
+  );
+  return rows[0] ?? null;
 }
 
-function updateOrder(order_id, updates) {
-  const order = orders.get(order_id);
-  if (!order) throw new Error(`Order not found: ${order_id}`);
+async function updateOrder(order_id, updates) {
+  const fields = Object.keys(updates);
+  const values = Object.values(updates);
+  if (fields.length === 0) throw new Error('No updates provided');
 
-  Object.assign(order, updates, { updated_at: new Date().toISOString() });
+  const setClauses = fields.map((f, i) => `${f} = $${i + 1}`).join(', ');
+  const { rows } = await pool.query(
+    `UPDATE orders SET ${setClauses}, updated_at = NOW()
+     WHERE id = $${fields.length + 1}
+     RETURNING *`,
+    [...values, order_id]
+  );
+  if (rows.length === 0) throw new Error(`Order not found: ${order_id}`);
+  const order = rows[0];
   console.log(`[ORDER] ${order_id} → ${order.status}`);
-
-  // Push the new status to any waiting SSE clients
   _notifySSEClients(order_id, order.status);
   return order;
 }
 
 // ── Square event deduplication ────────────────────────────────────────────────
+// Uses INSERT ... ON CONFLICT DO NOTHING for atomic dedup across retries.
+// Returns true if this event_id has already been processed.
 
-// Square retries webhook delivery, so the same event_id can arrive multiple
-// times. Return true if we've already processed this event_id.
-function isDuplicateEvent(event_id) {
-  if (seenEventIds.has(event_id)) return true;
-  seenEventIds.add(event_id);
-  return false;
+async function isDuplicateEvent(event_id) {
+  const { rowCount } = await pool.query(
+    'INSERT INTO seen_events (event_id) VALUES ($1) ON CONFLICT DO NOTHING',
+    [event_id]
+  );
+  return rowCount === 0;
 }
 
 // ── SSE client management ─────────────────────────────────────────────────────
@@ -81,6 +109,7 @@ function _notifySSEClients(order_id, status) {
 }
 
 module.exports = {
+  initDB,
   createOrder,
   getOrder,
   updateOrder,
