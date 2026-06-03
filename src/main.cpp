@@ -8,8 +8,9 @@
 #include "secrets.h"
 
 // ── constants (not secrets) ───────────────────────────────────
-const int   MQTT_PORT       = 8883;
-const int   RELOCK_DELAY_MS = 1500;  // ms to wait after door close before locking
+const int   MQTT_PORT           = 8883;
+const int   RELOCK_DELAY_MS     = 1500;   // ms to wait after door close before locking
+const unsigned long UNLOCK_TIMEOUT_MS = 60000;  // ms unlocked with no door open before refund
 // ─────────────────────────────────────────────────────────────
 
 const int RELAY_PIN = 26;
@@ -29,6 +30,8 @@ bool doorOpenedWhileUnlocked = false;
 
 unsigned long lastHeartbeat       = 0;
 const unsigned long HEARTBEAT_MS  = 30000;
+
+unsigned long unlockedAt = 0;  // millis() when last unlocked, for timeout tracking
 
 // ── Nonce ring buffer ─────────────────────────────────────────
 // Keeps the last NONCE_RING_SIZE nonces to detect replays.
@@ -90,6 +93,7 @@ void setState(State newState) {
       Serial.flush();
       digitalWrite(RELAY_PIN, HIGH);
       doorOpenedWhileUnlocked = false;
+      unlockedAt = millis();
       mqtt.publish(TOPIC_EVT, "{\"evt\":\"unlocked\"}");
       break;
   }
@@ -297,6 +301,12 @@ void loop() {
     if (!doorClosed && !doorOpenedWhileUnlocked) {
       Serial.println("[DOOR] Door opened while unlocked -- will relock on close.");
       doorOpenedWhileUnlocked = true;
+    }
+    // Timeout: door never opened — trigger refund path on backend
+    if (!doorOpenedWhileUnlocked && (millis() - unlockedAt >= UNLOCK_TIMEOUT_MS)) {
+      Serial.println("[LOCK] Unlock timeout -- door never opened.");
+      mqtt.publish(TOPIC_EVT, "{\"evt\":\"unlock_timeout\"}");
+      setState(LOCKED);
     }
     if (doorOpenedWhileUnlocked && doorClosed) {
       Serial.println("[LOCK] Door closed -- waiting for relock delay.");
