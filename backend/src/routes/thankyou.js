@@ -87,12 +87,12 @@ router.get('/', (req, res) => {
         case 'timed_out':
           done = true;
           evtSource.close();
-          setStatus('<span class="err">The fridge wasn\'t opened in time &#8212; your payment has been refunded automatically.</span>');
+          setStatus('<span class="err">The fridge wasn&#39;t opened in time &#8212; your payment has been refunded automatically.</span>');
           break;
         case 'refunded':
           done = true;
           evtSource.close();
-          setStatus('<span class="err">Something went wrong &#8212; you\'ll be refunded automatically.</span>');
+          setStatus('<span class="err">Something went wrong &#8212; you&#39;ll be refunded automatically.</span>');
           break;
       }
     }

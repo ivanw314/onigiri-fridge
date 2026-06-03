@@ -75,11 +75,12 @@ function handleMessage(topic, rawPayload) {
   const [, device_id, type] = parts;
 
   if (type === 'status') {
-    deviceHeartbeats.set(device_id, new Date());
     const raw = rawPayload.toString();
     if (raw === 'offline') {
+      deviceHeartbeats.delete(device_id);
       console.warn(`[MQTT] Device ${device_id} went offline`);
     } else {
+      deviceHeartbeats.set(device_id, new Date());
       console.log(`[MQTT] Heartbeat from ${device_id}`);
     }
     return;
