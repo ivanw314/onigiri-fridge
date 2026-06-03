@@ -65,6 +65,7 @@ router.get('/', (req, res) => {
     const ITEM_NAME = "${ITEM_NAME()}";
     const statusEl  = document.getElementById('status');
     let done = false;
+    let currentStatus = 'pending';
 
     function setStatus(html) {
       statusEl.innerHTML = html;
@@ -72,10 +73,10 @@ router.get('/', (req, res) => {
 
     function applyStatus(status) {
       if (done) return;
+      currentStatus = status;
       switch (status) {
         case 'dispensing':
         case 'unlocked':
-          // Don't close yet — wait for complete
           setStatus('<span class="open">🔓 Open the fridge door now!</span>');
           break;
         case 'complete':
@@ -83,10 +84,15 @@ router.get('/', (req, res) => {
           evtSource.close();
           setStatus('<span class="done">Enjoy your ' + ITEM_NAME + '! 🍙</span>');
           break;
+        case 'timed_out':
+          done = true;
+          evtSource.close();
+          setStatus('<span class="err">The fridge wasn\'t opened in time &#8212; your payment has been refunded automatically.</span>');
+          break;
         case 'refunded':
           done = true;
           evtSource.close();
-          setStatus('<span class="err">Something went wrong &#8212; you&#39;ll be refunded automatically.</span>');
+          setStatus('<span class="err">Something went wrong &#8212; you\'ll be refunded automatically.</span>');
           break;
       }
     }
@@ -107,9 +113,10 @@ router.get('/', (req, res) => {
         .catch(() => {});
     };
 
-    // After 30s show a patience message but keep listening
+    // Only show the patience message if we're still waiting for the fridge to unlock.
+    // Don't overwrite "Open the fridge door now!" if dispensing has already been reached.
     setTimeout(() => {
-      if (!done) {
+      if (!done && currentStatus !== 'dispensing') {
         setStatus('<span>Taking a little longer than usual… please wait.</span>');
       }
     }, 30_000);

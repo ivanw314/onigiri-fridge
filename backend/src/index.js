@@ -47,7 +47,7 @@ emitter.on('deviceEvent', async ({ device_id, event, order_id: eventOrderId }) =
         break;
       case 'unlock_timeout': {
         console.warn(`[EVT] Unlock timeout for order ${order_id} — refund needed`);
-        await updateOrder(order_id, { status: 'refunded' });
+        await updateOrder(order_id, { status: 'timed_out' });
         clearPendingOrder(device_id);
         const payment_id = order.square_payment_id;
         if (payment_id) {
