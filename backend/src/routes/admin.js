@@ -4,7 +4,7 @@ const {
   publishOTA, publishLock, publishUnlock, publishReboot,
   isDeviceOnline, getDeviceLastSeen, getRecentEvents,
 } = require('../mqttClient');
-const { getRecentOrders, getOrderStats, getOrder, updateOrder } = require('../orderStore');
+const { getRecentOrders, getOrderStats, getOrder, updateOrder, deleteOrder, deleteAllOrders } = require('../orderStore');
 const { createRefund } = require('../square');
 
 const DEVICE_ID = () => process.env.DEVICE_ID || 'onigiri';
@@ -94,6 +94,12 @@ router.get('/', (req, res) => {
     .event-dot  { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
     .event-name { flex: 1; }
     .event-time { color: #bbb; font-size: 0.75rem; white-space: nowrap; }
+    .delete-btn {
+      width: auto; font-size: 0.75rem; padding: 0.2rem 0.5rem; border-radius: 8px;
+      background: #fff; color: #aaa; border: 1px solid #e0e0e0; font-weight: 500; cursor: pointer; font-family: inherit;
+    }
+    .delete-btn:hover:not(:disabled) { color: #c00; border-color: #f5c0c0; background: #fef0f0; }
+    .delete-btn:disabled { opacity: 0.4; cursor: not-allowed; }
   </style>
 </head>
 <body>
@@ -164,7 +170,10 @@ router.get('/', (req, res) => {
     </div>
 
     <div class="card">
-      <h2>Recent Orders</h2>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+        <h2 style="margin-bottom:0">Recent Orders</h2>
+        <button id="clearOrdersBtn" class="secondary" style="width:auto;padding:0.3rem 0.75rem;font-size:0.8rem;color:#c00;border-color:#f5c0c0">Clear all</button>
+      </div>
       <div id="ordersList"><p style="color:#999;font-size:0.85rem">Loading&#x2026;</p></div>
     </div>
 
@@ -299,7 +308,8 @@ router.get('/', (req, res) => {
       el.innerHTML = '<table><thead><tr><th>ID</th><th>Status</th><th>When</th><th></th></tr></thead><tbody>' +
         orders.map(function(o) {
           var canRefund = o.status === 'complete' || o.status === 'dispensing';
-          var action = canRefund ? '<button class="refund-btn" data-id="' + o.id + '">Refund</button>' : '';
+          var action = (canRefund ? '<button class="refund-btn" data-id="' + o.id + '">Refund</button> ' : '') +
+            '<button class="delete-btn" data-id="' + o.id + '">&#x2715;</button>';
           return '<tr>' +
             '<td>' + o.id.slice(0, 8) + '&hellip;</td>' +
             '<td><span class="badge ' + o.status + '">' + o.status + '</span></td>' +
@@ -311,16 +321,44 @@ router.get('/', (req, res) => {
   }
 
   document.getElementById('ordersList').addEventListener('click', function(e) {
-    var btn = e.target.closest('.refund-btn');
-    if (!btn || btn.disabled) return;
-    var orderId = btn.getAttribute('data-id');
-    if (!confirm('Issue a refund for order ' + orderId.slice(0, 8) + '?')) return;
+    var refundBtn = e.target.closest('.refund-btn');
+    if (refundBtn && !refundBtn.disabled) {
+      var orderId = refundBtn.getAttribute('data-id');
+      if (!confirm('Issue a refund for order ' + orderId.slice(0, 8) + '?')) return;
+      refundBtn.disabled = true;
+      api('POST', '/admin/refund/' + orderId).then(function() {
+        refreshOrders();
+        refreshStats();
+      }).catch(function(err) {
+        alert('Refund failed: ' + err.message);
+        refundBtn.disabled = false;
+      });
+    }
+    var deleteBtn = e.target.closest('.delete-btn');
+    if (deleteBtn && !deleteBtn.disabled) {
+      var orderId = deleteBtn.getAttribute('data-id');
+      if (!confirm('Delete order ' + orderId.slice(0, 8) + '? This cannot be undone.')) return;
+      deleteBtn.disabled = true;
+      api('DELETE', '/admin/orders/' + orderId).then(function() {
+        refreshOrders();
+        refreshStats();
+      }).catch(function(err) {
+        alert('Delete failed: ' + err.message);
+        deleteBtn.disabled = false;
+      });
+    }
+  });
+
+  document.getElementById('clearOrdersBtn').addEventListener('click', function() {
+    if (!confirm('Delete ALL orders? This cannot be undone.')) return;
+    var btn = document.getElementById('clearOrdersBtn');
     btn.disabled = true;
-    api('POST', '/admin/refund/' + orderId).then(function() {
+    api('DELETE', '/admin/orders').then(function() {
       refreshOrders();
       refreshStats();
-    }).catch(function(e) {
-      alert('Refund failed: ' + e.message);
+    }).catch(function(err) {
+      alert('Clear failed: ' + err.message);
+    }).finally(function() {
       btn.disabled = false;
     });
   });
@@ -451,6 +489,24 @@ router.post('/reboot', requireAdmin, (req, res) => {
   try {
     publishReboot(device_id);
     res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/orders/:order_id', requireAdmin, async (req, res) => {
+  try {
+    await deleteOrder(req.params.order_id);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
+});
+
+router.delete('/orders', requireAdmin, async (req, res) => {
+  try {
+    const count = await deleteAllOrders();
+    res.json({ ok: true, count });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

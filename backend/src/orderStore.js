@@ -84,6 +84,16 @@ async function getRecentOrders(limit = 20) {
   return rows;
 }
 
+async function deleteOrder(order_id) {
+  const { rowCount } = await pool.query('DELETE FROM orders WHERE id = $1', [order_id]);
+  if (rowCount === 0) throw new Error(`Order not found: ${order_id}`);
+}
+
+async function deleteAllOrders() {
+  const { rowCount } = await pool.query('DELETE FROM orders');
+  return rowCount;
+}
+
 async function getOrderStats() {
   const [{ rows: todayRows }, { rows: totalRows }] = await Promise.all([
     pool.query(
@@ -139,6 +149,8 @@ module.exports = {
   updateOrder,
   getRecentOrders,
   getOrderStats,
+  deleteOrder,
+  deleteAllOrders,
   isDuplicateEvent,
   addSSEClient,
   removeSSEClient,
