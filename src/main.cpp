@@ -3,14 +3,16 @@
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
+#include <HTTPUpdate.h>
 #include "mbedtls/md.h"
 #include <time.h>
 #include "secrets.h"
 
 // ── constants (not secrets) ───────────────────────────────────
-const int   MQTT_PORT           = 8883;
-const int   RELOCK_DELAY_MS     = 1500;   // ms to wait after door close before locking
-const unsigned long UNLOCK_TIMEOUT_MS = 60000;  // ms unlocked with no door open before refund
+const int            MQTT_PORT         = 8883;
+const int            RELOCK_DELAY_MS   = 1500;
+const unsigned long  UNLOCK_TIMEOUT_MS = 60000;
+const unsigned long  HEARTBEAT_MS      = 30000;
 // ─────────────────────────────────────────────────────────────
 
 const int RELAY_PIN = 26;
@@ -27,16 +29,16 @@ enum State { LOCKED, UNLOCKED };
 State state = LOCKED;
 bool lastDoorClosed          = true;
 bool doorOpenedWhileUnlocked = false;
+unsigned long lastHeartbeat  = 0;
+unsigned long unlockedAt     = 0;
 
-unsigned long lastHeartbeat       = 0;
-const unsigned long HEARTBEAT_MS  = 30000;
-
-unsigned long unlockedAt = 0;  // millis() when last unlocked, for timeout tracking
+// ── OTA ───────────────────────────────────────────────────────
+bool otaPending = false;
+char otaUrl[256];
 
 // ── Nonce ring buffer ─────────────────────────────────────────
-// Keeps the last NONCE_RING_SIZE nonces to detect replays.
 #define NONCE_RING_SIZE 8
-static char seenNonces[NONCE_RING_SIZE][37];  // UUID: 36 chars + NUL
+static char seenNonces[NONCE_RING_SIZE][37];
 static int  nonceCursor = 0;
 
 static bool isNonceSeen(const char* nonce) {
@@ -54,7 +56,6 @@ static void recordNonce(const char* nonce) {
 }
 
 // ── HMAC-SHA256 ───────────────────────────────────────────────
-// Returns true if HMAC-SHA256(key, message) produces the expected hex string.
 static bool verifyHMAC(const char* message, const char* key, const char* expected) {
   uint8_t hmacBytes[32];
   mbedtls_md_context_t ctx;
@@ -99,6 +100,31 @@ void setState(State newState) {
   }
 }
 
+// ── OTA update ────────────────────────────────────────────────
+void performOTA(const char* url) {
+  Serial.print("[OTA] Downloading from: ");
+  Serial.println(url);
+
+  WiFiClientSecure otaClient;
+  otaClient.setInsecure();
+  httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+  t_httpUpdate_return ret = httpUpdate.update(otaClient, url);
+  switch (ret) {
+    case HTTP_UPDATE_OK:
+      Serial.println("[OTA] Flash OK -- rebooting.");  // device reboots; line won't print
+      break;
+    case HTTP_UPDATE_NO_UPDATES:
+      Serial.println("[OTA] Server returned no update.");
+      break;
+    case HTTP_UPDATE_FAILED:
+      Serial.printf("[OTA] Failed (%d): %s\n",
+        httpUpdate.getLastError(),
+        httpUpdate.getLastErrorString().c_str());
+      break;
+  }
+}
+
 // ── MQTT message handler ──────────────────────────────────────
 void onMqttMessage(char* topic, byte* payload, unsigned int length) {
   char msg[512];
@@ -111,26 +137,16 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
   Serial.print(": ");
   Serial.println(msg);
 
-  // Parse JSON payload
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, msg);
-  if (err) {
-    Serial.println("[CMD]  JSON parse error -- ignoring.");
-    return;
-  }
+  if (err) { Serial.println("[CMD]  JSON parse error -- ignoring."); return; }
 
-  const char* cmd      = doc["cmd"]      | "";
-  const char* order_id = doc["order_id"] | "";
-  const char* nonce    = doc["nonce"]    | "";
-  long        ts       = doc["ts"]       | 0L;
-  const char* sig      = doc["sig"]      | "";
+  const char* cmd   = doc["cmd"]   | "";
+  const char* nonce = doc["nonce"] | "";
+  long        ts    = doc["ts"]    | 0L;
+  const char* sig   = doc["sig"]   | "";
 
-  if (strcmp(cmd, "unlock") != 0) {
-    Serial.println("[CMD]  Unrecognised command -- ignored.");
-    return;
-  }
-
-  // 1. Timestamp freshness (only enforced after SNTP has synced)
+  // 1. Timestamp freshness (only enforced after SNTP sync)
   time_t now = time(nullptr);
   if (now > 1000000000L) {
     long long diff = (long long)now - (long long)ts;
@@ -148,13 +164,23 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
-  // 3. HMAC-SHA256 verification
-  // Canonical form matches backend signPayload(): keys sorted alphabetically.
-  // Fields: cmd (string), nonce (string), order_id (string), ts (number)
-  char canonical[300];
-  snprintf(canonical, sizeof(canonical),
-    "{\"cmd\":\"%s\",\"nonce\":\"%s\",\"order_id\":\"%s\",\"ts\":%ld}",
-    cmd, nonce, order_id, ts);
+  // 3. Build canonical form (keys sorted alphabetically, matching backend signPayload)
+  //    and verify HMAC before executing anything
+  char canonical[512];
+  if (strcmp(cmd, "unlock") == 0) {
+    const char* order_id = doc["order_id"] | "";
+    snprintf(canonical, sizeof(canonical),
+      "{\"cmd\":\"%s\",\"nonce\":\"%s\",\"order_id\":\"%s\",\"ts\":%ld}",
+      cmd, nonce, order_id, ts);
+  } else if (strcmp(cmd, "ota") == 0) {
+    const char* url = doc["url"] | "";
+    snprintf(canonical, sizeof(canonical),
+      "{\"cmd\":\"%s\",\"nonce\":\"%s\",\"ts\":%ld,\"url\":\"%s\"}",
+      cmd, nonce, ts, url);
+  } else {
+    Serial.println("[CMD]  Unrecognised command -- ignored.");
+    return;
+  }
 
   if (!verifyHMAC(canonical, DEVICE_SECRET, sig)) {
     Serial.println("[AUTH] HMAC mismatch -- rejected.");
@@ -162,15 +188,23 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
     return;
   }
 
-  // All checks passed — record nonce and act
   recordNonce(nonce);
 
-  if (state == LOCKED) {
-    Serial.println("[CMD]  Unlock command verified.");
-    setState(UNLOCKED);
-  } else {
-    Serial.println("[CMD]  Already unlocked.");
-    mqtt.publish(TOPIC_EVT, "{\"evt\":\"already_unlocked\"}");
+  // 4. Execute verified command
+  if (strcmp(cmd, "unlock") == 0) {
+    if (state == LOCKED) {
+      Serial.println("[CMD]  Unlock command verified.");
+      setState(UNLOCKED);
+    } else {
+      Serial.println("[CMD]  Already unlocked.");
+      mqtt.publish(TOPIC_EVT, "{\"evt\":\"already_unlocked\"}");
+    }
+  } else if (strcmp(cmd, "ota") == 0) {
+    const char* url = doc["url"] | "";
+    strncpy(otaUrl, url, sizeof(otaUrl) - 1);
+    otaUrl[sizeof(otaUrl) - 1] = '\0';
+    otaPending = true;
+    Serial.println("[OTA]  Update scheduled.");
   }
 }
 
@@ -189,7 +223,6 @@ void connectWifi() {
 }
 
 // ── NTP time sync ─────────────────────────────────────────────
-// Needed so timestamp freshness checks have a reference clock.
 void syncTime() {
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   Serial.print("[SNTP] Syncing time");
@@ -212,16 +245,13 @@ void connectMqtt() {
   while (!mqtt.connected()) {
     Serial.print("[MQTT] Connecting...");
     bool ok = mqtt.connect(
-      DEVICE_ID,              // client ID
-      MQTT_USER, MQTT_PASS,   // credentials
-      TOPIC_STATUS,           // Last Will topic
-      1,                      // Last Will QoS
-      true,                   // Last Will retain
-      "offline"               // Last Will payload
+      DEVICE_ID,
+      MQTT_USER, MQTT_PASS,
+      TOPIC_STATUS, 1, true, "offline"
     );
     if (ok) {
       Serial.println(" connected.");
-      mqtt.publish(TOPIC_STATUS, "online", true);  // retained
+      mqtt.publish(TOPIC_STATUS, "online", true);
       mqtt.subscribe(TOPIC_CMD);
       Serial.print("[MQTT] Subscribed to ");
       Serial.println(TOPIC_CMD);
@@ -260,7 +290,7 @@ void setup() {
   connectWifi();
   syncTime();
 
-  wifiClient.setInsecure();  // no cert pinning yet
+  wifiClient.setInsecure();
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setCallback(onMqttMessage);
   mqtt.setBufferSize(512);
@@ -270,6 +300,21 @@ void setup() {
 
 // ── loop ──────────────────────────────────────────────────────
 void loop() {
+  // OTA takes priority: lock fridge, flush publish, download, flash, reboot
+  if (otaPending) {
+    otaPending = false;
+    setState(LOCKED);
+    mqtt.publish(TOPIC_EVT, "{\"evt\":\"ota_start\"}");
+    mqtt.loop();   // flush the publish before disconnecting
+    delay(200);
+    mqtt.disconnect();
+    performOTA(otaUrl);
+    // Only reached on OTA failure — reconnect and report
+    connectMqtt();
+    mqtt.publish(TOPIC_EVT, "{\"evt\":\"ota_failed\"}");
+    return;
+  }
+
   if (!mqtt.connected()) {
     Serial.println("[MQTT] Disconnected -- reconnecting.");
     connectMqtt();
