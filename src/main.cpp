@@ -177,6 +177,10 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
     snprintf(canonical, sizeof(canonical),
       "{\"cmd\":\"%s\",\"nonce\":\"%s\",\"ts\":%ld,\"url\":\"%s\"}",
       cmd, nonce, ts, url);
+  } else if (strcmp(cmd, "lock") == 0) {
+    snprintf(canonical, sizeof(canonical),
+      "{\"cmd\":\"%s\",\"nonce\":\"%s\",\"ts\":%ld}",
+      cmd, nonce, ts);
   } else {
     Serial.println("[CMD]  Unrecognised command -- ignored.");
     return;
@@ -205,6 +209,9 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
     otaUrl[sizeof(otaUrl) - 1] = '\0';
     otaPending = true;
     Serial.println("[OTA]  Update scheduled.");
+  } else if (strcmp(cmd, "lock") == 0) {
+    Serial.println("[CMD]  Force lock verified.");
+    setState(LOCKED);
   }
 }
 

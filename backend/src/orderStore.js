@@ -76,6 +76,14 @@ async function updateOrder(order_id, updates) {
   return order;
 }
 
+async function getRecentOrders(limit = 20) {
+  const { rows } = await pool.query(
+    'SELECT * FROM orders ORDER BY created_at DESC LIMIT $1',
+    [limit]
+  );
+  return rows;
+}
+
 // ── Square event deduplication ────────────────────────────────────────────────
 // Uses INSERT ... ON CONFLICT DO NOTHING for atomic dedup across retries.
 // Returns true if this event_id has already been processed.
@@ -113,6 +121,7 @@ module.exports = {
   createOrder,
   getOrder,
   updateOrder,
+  getRecentOrders,
   isDuplicateEvent,
   addSSEClient,
   removeSSEClient,

@@ -20,7 +20,7 @@ app.use('/thank-you',     require('./routes/thankyou'));
 app.use('/api/checkout',  require('./routes/checkout'));
 app.use('/api/orders',    require('./routes/orders'));
 app.use('/webhooks',      require('./routes/webhook'));
-app.use('/api/admin',     require('./routes/admin'));
+app.use('/admin',         require('./routes/admin'));
 
 app.get('/health', (_req, res) => res.json({ ok: true, ts: Date.now() }));
 

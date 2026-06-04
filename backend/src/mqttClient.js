@@ -114,6 +114,26 @@ function handleMessage(topic, rawPayload) {
 
 // ── Publish unlock command ────────────────────────────────────────────────────
 
+function publishLock(device_id) {
+  if (!client?.connected) throw new Error('MQTT client not connected');
+  const secret = process.env.DEVICE_SECRET;
+  if (!secret) throw new Error('DEVICE_SECRET env var not set');
+
+  const payload = {
+    cmd:   'lock',
+    nonce: uuidv4(),
+    ts:    Math.floor(Date.now() / 1000),
+  };
+  payload.sig = signPayload(payload, secret);
+
+  client.publish(
+    `fridge/${device_id}/cmd`,
+    JSON.stringify(payload),
+    { qos: 1 }
+  );
+  console.log(`[MQTT] Published lock → ${device_id}`);
+}
+
 function publishOTA(device_id, url) {
   if (!client?.connected) throw new Error('MQTT client not connected');
   const secret = process.env.DEVICE_SECRET;
@@ -188,6 +208,7 @@ function clearPendingOrder(device_id) {
 module.exports = {
   connectMQTT,
   publishUnlock,
+  publishLock,
   publishOTA,
   isDeviceOnline,
   getPendingOrder,
