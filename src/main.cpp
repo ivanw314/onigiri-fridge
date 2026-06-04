@@ -268,7 +268,7 @@ void connectMqtt() {
 void setup() {
   Serial.begin(115200);
   Serial.println("----------------------------------------");
-  Serial.println("  Onigiri Fridge Phase 3 -- booting...");
+  Serial.println("  Onigiri Fridge -- booting...");
   Serial.println("----------------------------------------");
 
   snprintf(TOPIC_CMD,    sizeof(TOPIC_CMD),    "fridge/%s/cmd",    DEVICE_ID);
