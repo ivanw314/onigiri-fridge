@@ -14,6 +14,18 @@ const deviceHeartbeats = new Map();
 // order_id in event payloads (Phase 3 firmware update).
 const pendingOrders = new Map(); // device_id → order_id
 
+const MAX_EVENTS   = 50;
+const recentEvents = []; // newest-first ring buffer
+
+function pushEvent(device_id, event) {
+  recentEvents.unshift({ device_id, event, ts: new Date().toISOString() });
+  if (recentEvents.length > MAX_EVENTS) recentEvents.pop();
+}
+
+function getRecentEvents() {
+  return recentEvents.slice();
+}
+
 let client = null;
 
 // ── Connection ────────────────────────────────────────────────────────────────
@@ -78,9 +90,12 @@ function handleMessage(topic, rawPayload) {
     const raw = rawPayload.toString();
     if (raw === 'offline') {
       deviceHeartbeats.delete(device_id);
+      pushEvent(device_id, 'offline');
       console.warn(`[MQTT] Device ${device_id} went offline`);
     } else {
+      const wasOffline = !deviceHeartbeats.has(device_id);
       deviceHeartbeats.set(device_id, new Date());
+      if (wasOffline) pushEvent(device_id, 'online');
       console.log(`[MQTT] Heartbeat from ${device_id}`);
     }
     return;
@@ -107,6 +122,7 @@ function handleMessage(topic, rawPayload) {
       return;
     }
 
+    pushEvent(device_id, event);
     console.log(`[MQTT] Event from ${device_id}: ${event}`, order_id ? `(order ${order_id})` : '');
     emitter.emit('deviceEvent', { device_id, event, order_id });
   }
@@ -237,6 +253,7 @@ module.exports = {
   publishReboot,
   isDeviceOnline,
   getDeviceLastSeen,
+  getRecentEvents,
   getPendingOrder,
   clearPendingOrder,
   emitter,

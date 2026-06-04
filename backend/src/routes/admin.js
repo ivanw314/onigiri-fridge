@@ -2,7 +2,7 @@
 const { Router } = require('express');
 const {
   publishOTA, publishLock, publishUnlock, publishReboot,
-  isDeviceOnline, getDeviceLastSeen,
+  isDeviceOnline, getDeviceLastSeen, getRecentEvents,
 } = require('../mqttClient');
 const { getRecentOrders, getOrderStats, getOrder, updateOrder } = require('../orderStore');
 const { createRefund } = require('../square');
@@ -88,6 +88,12 @@ router.get('/', (req, res) => {
     }
     .refund-btn:hover:not(:disabled) { background: #fef0f0; }
     .refund-btn:disabled { color: #aaa; border-color: #e0e0e0; cursor: not-allowed; }
+    .event-list { list-style: none; display: flex; flex-direction: column; max-height: 260px; overflow-y: auto; }
+    .event-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0; border-top: 1px solid #f0f0f0; font-size: 0.83rem; }
+    .event-item:first-child { border-top: none; }
+    .event-dot  { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+    .event-name { flex: 1; }
+    .event-time { color: #bbb; font-size: 0.75rem; white-space: nowrap; }
   </style>
 </head>
 <body>
@@ -162,6 +168,11 @@ router.get('/', (req, res) => {
       <div id="ordersList"><p style="color:#999;font-size:0.85rem">Loading&#x2026;</p></div>
     </div>
 
+    <div class="card">
+      <h2>Activity</h2>
+      <div id="eventLog"><p style="color:#999;font-size:0.83rem">No events yet.</p></div>
+    </div>
+
   </div>
 </div>
 
@@ -224,9 +235,37 @@ router.get('/', (req, res) => {
     refreshStatus();
     refreshStats();
     refreshOrders();
+    refreshEvents();
     setInterval(refreshStatus, 15000);
     setInterval(refreshStats,  60000);
     setInterval(refreshOrders, 30000);
+    setInterval(refreshEvents, 10000);
+  }
+
+  function eventColor(evt) {
+    if (evt === 'auth_failed' || evt === 'ota_failed' || evt === 'offline' || evt === 'unlock_timeout') return '#c00';
+    if (evt === 'ota_start' || evt === 'rebooting') return '#b45309';
+    if (evt === 'online' || evt === 'unlocked') return '#1a7a1a';
+    return '#888';
+  }
+
+  function refreshEvents() {
+    api('GET', '/admin/events').then(function(events) {
+      var el = document.getElementById('eventLog');
+      if (!events.length) {
+        el.innerHTML = '<p style="color:#999;font-size:0.83rem">No events yet.</p>';
+        return;
+      }
+      el.innerHTML = '<ul class="event-list">' +
+        events.map(function(e) {
+          var color = eventColor(e.event);
+          return '<li class="event-item">' +
+            '<span class="event-dot" style="background:' + color + '"></span>' +
+            '<span class="event-name">' + e.event.replace(/_/g, ' ') + '</span>' +
+            '<span class="event-time">' + timeAgo(e.ts) + '</span>' +
+            '</li>';
+        }).join('') + '</ul>';
+    }).catch(function() {});
   }
 
   function refreshStatus() {
@@ -353,6 +392,10 @@ router.get('/', (req, res) => {
 });
 
 // ── API endpoints ─────────────────────────────────────────────────────────────
+
+router.get('/events', requireAdmin, (req, res) => {
+  res.json(getRecentEvents());
+});
 
 router.get('/status', requireAdmin, (req, res) => {
   const device_id = DEVICE_ID();
