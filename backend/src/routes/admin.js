@@ -287,7 +287,7 @@ router.get('/', (req, res) => {
   function eventColor(evt) {
     if (evt === 'auth_failed' || evt === 'ota_failed' || evt === 'offline' || evt === 'unlock_timeout') return '#c00';
     if (evt === 'ota_start' || evt === 'rebooting') return '#b45309';
-    if (evt === 'online' || evt === 'unlocked') return '#1a7a1a';
+    if (evt === 'online' || evt === 'unlocked' || evt === 'ota_complete') return '#1a7a1a';
     return '#888';
   }
 

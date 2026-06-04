@@ -14,8 +14,9 @@ const deviceHeartbeats = new Map();
 // order_id in event payloads (Phase 3 firmware update).
 const pendingOrders = new Map(); // device_id → order_id
 
-const MAX_EVENTS   = 50;
-const recentEvents = []; // newest-first ring buffer
+const MAX_EVENTS      = 50;
+const recentEvents    = []; // newest-first ring buffer
+const otaPending      = new Set(); // devices mid-OTA (ota_start seen, not yet back online)
 
 function pushEvent(device_id, event) {
   recentEvents.unshift({ device_id, event, ts: new Date().toISOString() });
@@ -95,7 +96,14 @@ function handleMessage(topic, rawPayload) {
     } else {
       const wasOffline = !deviceHeartbeats.has(device_id);
       deviceHeartbeats.set(device_id, new Date());
-      if (wasOffline) pushEvent(device_id, 'online');
+      if (wasOffline) {
+        if (otaPending.has(device_id)) {
+          otaPending.delete(device_id);
+          pushEvent(device_id, 'ota_complete');
+        } else {
+          pushEvent(device_id, 'online');
+        }
+      }
       console.log(`[MQTT] Heartbeat from ${device_id}`);
     }
     return;
@@ -122,6 +130,8 @@ function handleMessage(topic, rawPayload) {
       return;
     }
 
+    if (event === 'ota_start')  otaPending.add(device_id);
+    if (event === 'ota_failed') otaPending.delete(device_id);
     pushEvent(device_id, event);
     console.log(`[MQTT] Event from ${device_id}: ${event}`, order_id ? `(order ${order_id})` : '');
     emitter.emit('deviceEvent', { device_id, event, order_id });
