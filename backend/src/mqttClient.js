@@ -181,6 +181,30 @@ function publishUnlock(device_id, order_id) {
   console.log(`[MQTT] Published unlock → ${device_id} / order ${order_id}`);
 }
 
+function publishReboot(device_id) {
+  if (!client?.connected) throw new Error('MQTT client not connected');
+  const secret = process.env.DEVICE_SECRET;
+  if (!secret) throw new Error('DEVICE_SECRET env var not set');
+
+  const payload = {
+    cmd:   'reboot',
+    nonce: uuidv4(),
+    ts:    Math.floor(Date.now() / 1000),
+  };
+  payload.sig = signPayload(payload, secret);
+
+  client.publish(
+    `fridge/${device_id}/cmd`,
+    JSON.stringify(payload),
+    { qos: 1 }
+  );
+  console.log(`[MQTT] Published reboot → ${device_id}`);
+}
+
+function getDeviceLastSeen(device_id) {
+  return deviceHeartbeats.get(device_id) || null;
+}
+
 function signPayload(payload, secret) {
   const { sig: _omit, ...rest } = payload;
   const canonical = JSON.stringify(
@@ -210,7 +234,9 @@ module.exports = {
   publishUnlock,
   publishLock,
   publishOTA,
+  publishReboot,
   isDeviceOnline,
+  getDeviceLastSeen,
   getPendingOrder,
   clearPendingOrder,
   emitter,

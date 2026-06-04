@@ -1,7 +1,11 @@
 'use strict';
 const { Router } = require('express');
-const { publishOTA, publishLock, publishUnlock, isDeviceOnline } = require('../mqttClient');
-const { getRecentOrders } = require('../orderStore');
+const {
+  publishOTA, publishLock, publishUnlock, publishReboot,
+  isDeviceOnline, getDeviceLastSeen,
+} = require('../mqttClient');
+const { getRecentOrders, getOrderStats, getOrder, updateOrder } = require('../orderStore');
+const { createRefund } = require('../square');
 
 const DEVICE_ID = () => process.env.DEVICE_ID || 'onigiri';
 
@@ -28,7 +32,7 @@ router.get('/', (req, res) => {
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, -apple-system, sans-serif; background: #f4f4ef; min-height: 100dvh; }
-    #login    { display: none; align-items: center; justify-content: center; min-height: 100dvh; padding: 1.5rem; }
+    #login     { display: none; align-items: center; justify-content: center; min-height: 100dvh; padding: 1.5rem; }
     #dashboard { display: none; padding: 1.5rem; }
     .wrap { max-width: 380px; margin: 0 auto; display: flex; flex-direction: column; gap: 1rem; }
     .card { background: #fff; border-radius: 20px; padding: 1.75rem 1.5rem; box-shadow: 0 4px 24px rgba(0,0,0,0.07); }
@@ -55,10 +59,16 @@ router.get('/', (req, res) => {
     .msg.ok  { color: #1a7a1a; }
     .msg.err { color: #c00; }
     .status-row { display: flex; align-items: center; justify-content: space-between; }
-    .status-label { display: flex; align-items: center; gap: 0.5rem; font-weight: 600; font-size: 0.95rem; }
+    .status-label { display: flex; align-items: center; gap: 0.5rem; }
+    .status-main { font-weight: 600; font-size: 0.95rem; }
+    .status-sub  { font-size: 0.78rem; color: #999; margin-top: 0.15rem; }
     .dot { width: 10px; height: 10px; border-radius: 50%; background: #ccc; flex-shrink: 0; }
     .dot.online  { background: #1a7a1a; }
     .dot.offline { background: #c00; }
+    .stats-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem 1rem; }
+    .stat { text-align: center; padding: 0.5rem 0; }
+    .stat-num   { font-size: 1.6rem; font-weight: 700; line-height: 1; }
+    .stat-label { font-size: 0.72rem; color: #999; margin-top: 0.25rem; text-transform: uppercase; letter-spacing: 0.03em; }
     table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
     th { text-align: left; color: #888; font-weight: 500; padding-bottom: 0.5rem; }
     td { padding: 0.45rem 0; border-top: 1px solid #f0f0f0; vertical-align: middle; }
@@ -72,6 +82,12 @@ router.get('/', (req, res) => {
     .badge.pending    { background: #f5f5f5; color: #666; }
     .badge.timed_out,
     .badge.refunded   { background: #fde8e8; color: #c00; }
+    .refund-btn {
+      width: auto; font-size: 0.75rem; padding: 0.2rem 0.6rem; border-radius: 8px;
+      background: #fff; color: #c00; border: 1px solid #f5c0c0; font-weight: 500; cursor: pointer;
+    }
+    .refund-btn:hover:not(:disabled) { background: #fef0f0; }
+    .refund-btn:disabled { color: #aaa; border-color: #e0e0e0; cursor: not-allowed; }
   </style>
 </head>
 <body>
@@ -93,9 +109,34 @@ router.get('/', (req, res) => {
       <div class="status-row">
         <div class="status-label">
           <span class="dot" id="dot"></span>
-          <span id="statusText">Checking&#x2026;</span>
+          <div>
+            <div class="status-main" id="statusText">Checking&#x2026;</div>
+            <div class="status-sub"  id="lastSeenText"></div>
+          </div>
         </div>
         <button class="secondary" id="logoutBtn" style="width:auto;padding:0.4rem 0.9rem;font-size:0.85rem">Sign out</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Sales</h2>
+      <div class="stats-row">
+        <div class="stat">
+          <div class="stat-num" id="statTodayCount">&#x2014;</div>
+          <div class="stat-label">Today</div>
+        </div>
+        <div class="stat">
+          <div class="stat-num" id="statTodayRev">&#x2014;</div>
+          <div class="stat-label">Revenue today</div>
+        </div>
+        <div class="stat">
+          <div class="stat-num" id="statTotalCount">&#x2014;</div>
+          <div class="stat-label">All time</div>
+        </div>
+        <div class="stat">
+          <div class="stat-num" id="statTotalRev">&#x2014;</div>
+          <div class="stat-label">All-time revenue</div>
+        </div>
       </div>
     </div>
 
@@ -105,6 +146,7 @@ router.get('/', (req, res) => {
         <button id="unlockBtn">&#x1F513; Unlock</button>
         <button id="lockBtn" class="secondary">&#x1F512; Lock</button>
       </div>
+      <button id="rebootBtn" class="secondary" style="margin-top:0.6rem">&#x1F504; Reboot device</button>
       <p class="msg" id="controlMsg"></p>
     </div>
 
@@ -124,148 +166,186 @@ router.get('/', (req, res) => {
 </div>
 
 <script>
-  var token = sessionStorage.getItem("adminToken");
-  var DEVICE_ID = "${DEVICE_ID()}";
+  var token    = sessionStorage.getItem('adminToken');
+  var DEVICEID = '${DEVICE_ID()}';
 
   function api(method, path, body) {
     return fetch(path, {
       method: method,
-      headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
       body: body ? JSON.stringify(body) : undefined,
     }).then(function(r) {
-      if (r.status === 401) { doLogout(); throw new Error("Wrong password."); }
+      if (r.status === 401) { doLogout(); throw new Error('Wrong password.'); }
       return r.json().then(function(data) {
-        if (!r.ok) throw new Error(data.error || "Request failed");
+        if (!r.ok) throw new Error(data.error || 'Request failed');
         return data;
       });
     });
   }
 
-  var loginEl     = document.getElementById("login");
-  var dashboardEl = document.getElementById("dashboard");
-  var passInput   = document.getElementById("passInput");
-  var loginBtn    = document.getElementById("loginBtn");
-  var loginErr    = document.getElementById("loginErr");
+  var loginEl     = document.getElementById('login');
+  var dashboardEl = document.getElementById('dashboard');
+  var passInput   = document.getElementById('passInput');
+  var loginBtn    = document.getElementById('loginBtn');
+  var loginErr    = document.getElementById('loginErr');
 
-  loginBtn.addEventListener("click", tryLogin);
-  passInput.addEventListener("keydown", function(e) { if (e.key === "Enter") tryLogin(); });
+  loginBtn.addEventListener('click', tryLogin);
+  passInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') tryLogin(); });
 
   function tryLogin() {
-    loginErr.textContent = "";
+    loginErr.textContent = '';
     loginBtn.disabled = true;
-    loginBtn.textContent = "Signing in...";
+    loginBtn.textContent = 'Signing in...';
     token = passInput.value;
-    api("GET", "/admin/status").then(function() {
-      sessionStorage.setItem("adminToken", token);
+    api('GET', '/admin/status').then(function() {
+      sessionStorage.setItem('adminToken', token);
       showDashboard();
     }).catch(function(e) {
       loginErr.textContent = e.message;
       token = null;
     }).finally(function() {
       loginBtn.disabled = false;
-      loginBtn.textContent = "Sign in";
+      loginBtn.textContent = 'Sign in';
     });
   }
 
   function doLogout() {
-    sessionStorage.removeItem("adminToken");
+    sessionStorage.removeItem('adminToken');
     token = null;
-    loginEl.style.display = "flex";
-    dashboardEl.style.display = "none";
-    passInput.value = "";
+    loginEl.style.display = 'flex';
+    dashboardEl.style.display = 'none';
+    passInput.value = '';
   }
-  document.getElementById("logoutBtn").addEventListener("click", doLogout);
+  document.getElementById('logoutBtn').addEventListener('click', doLogout);
 
   function showDashboard() {
-    loginEl.style.display = "none";
-    dashboardEl.style.display = "block";
+    loginEl.style.display = 'none';
+    dashboardEl.style.display = 'block';
     refreshStatus();
+    refreshStats();
     refreshOrders();
     setInterval(refreshStatus, 15000);
+    setInterval(refreshStats,  60000);
+    setInterval(refreshOrders, 30000);
   }
 
   function refreshStatus() {
-    api("GET", "/admin/status").then(function(d) {
-      var dot  = document.getElementById("dot");
-      var text = document.getElementById("statusText");
-      dot.className    = "dot " + (d.online ? "online" : "offline");
-      text.textContent = (d.online ? "Online" : "Offline") + " — " + DEVICE_ID;
+    api('GET', '/admin/status').then(function(d) {
+      var dot  = document.getElementById('dot');
+      var text = document.getElementById('statusText');
+      var sub  = document.getElementById('lastSeenText');
+      dot.className    = 'dot ' + (d.online ? 'online' : 'offline');
+      text.textContent = (d.online ? 'Online' : 'Offline') + ' — ' + DEVICEID;
+      sub.textContent  = d.lastSeen ? 'Last seen ' + timeAgo(d.lastSeen) : '';
+    }).catch(function() {});
+  }
+
+  function refreshStats() {
+    api('GET', '/admin/stats').then(function(s) {
+      var price = (s.itemPriceCents || 0) / 100;
+      document.getElementById('statTodayCount').textContent = s.todayCount;
+      document.getElementById('statTodayRev').textContent   = '$' + (s.todayCount  * price).toFixed(2);
+      document.getElementById('statTotalCount').textContent = s.totalCount;
+      document.getElementById('statTotalRev').textContent   = '$' + (s.totalCount  * price).toFixed(2);
     }).catch(function() {});
   }
 
   function refreshOrders() {
-    api("GET", "/admin/orders").then(function(orders) {
-      var el = document.getElementById("ordersList");
+    api('GET', '/admin/orders').then(function(orders) {
+      var el = document.getElementById('ordersList');
       if (!orders.length) {
         el.innerHTML = '<p style="color:#999;font-size:0.85rem">No orders yet.</p>';
         return;
       }
-      el.innerHTML = '<table><thead><tr><th>ID</th><th>Status</th><th>When</th></tr></thead><tbody>' +
+      el.innerHTML = '<table><thead><tr><th>ID</th><th>Status</th><th>When</th><th></th></tr></thead><tbody>' +
         orders.map(function(o) {
-          return '<tr><td>' + o.id.slice(0, 8) + '&hellip;</td>' +
+          var canRefund = o.status === 'complete' || o.status === 'dispensing';
+          var action = canRefund ? '<button class="refund-btn" data-id="' + o.id + '">Refund</button>' : '';
+          return '<tr>' +
+            '<td>' + o.id.slice(0, 8) + '&hellip;</td>' +
             '<td><span class="badge ' + o.status + '">' + o.status + '</span></td>' +
-            '<td>' + timeAgo(o.created_at) + '</td></tr>';
+            '<td>' + timeAgo(o.created_at) + '</td>' +
+            '<td>' + action + '</td>' +
+            '</tr>';
         }).join('') + '</tbody></table>';
     }).catch(function() {});
   }
 
+  document.getElementById('ordersList').addEventListener('click', function(e) {
+    var btn = e.target.closest('.refund-btn');
+    if (!btn || btn.disabled) return;
+    var orderId = btn.getAttribute('data-id');
+    if (!confirm('Issue a refund for order ' + orderId.slice(0, 8) + '?')) return;
+    btn.disabled = true;
+    api('POST', '/admin/refund/' + orderId).then(function() {
+      refreshOrders();
+      refreshStats();
+    }).catch(function(e) {
+      alert('Refund failed: ' + e.message);
+      btn.disabled = false;
+    });
+  });
+
   function timeAgo(iso) {
     var s = Math.floor((Date.now() - new Date(iso)) / 1000);
-    if (s < 60)    return s + "s ago";
-    if (s < 3600)  return Math.floor(s / 60) + "m ago";
-    if (s < 86400) return Math.floor(s / 3600) + "h ago";
-    return Math.floor(s / 86400) + "d ago";
+    if (s < 60)    return s + 's ago';
+    if (s < 3600)  return Math.floor(s / 60) + 'm ago';
+    if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+    return Math.floor(s / 86400) + 'd ago';
   }
 
   function doAction(path, btnId, msgId, label) {
     var btn = document.getElementById(btnId);
     var msg = document.getElementById(msgId);
     btn.disabled = true;
-    msg.className = "msg";
-    msg.textContent = "";
-    api("POST", path).then(function() {
-      msg.className = "msg ok";
-      msg.textContent = label + " sent.";
+    msg.className = 'msg';
+    msg.textContent = '';
+    api('POST', path).then(function() {
+      msg.className = 'msg ok';
+      msg.textContent = label + ' sent.';
     }).catch(function(e) {
-      msg.className = "msg err";
+      msg.className = 'msg err';
       msg.textContent = e.message;
     }).finally(function() {
       btn.disabled = false;
     });
   }
 
-  document.getElementById("unlockBtn").addEventListener("click", function() {
-    doAction("/admin/unlock", "unlockBtn", "controlMsg", "Unlock");
+  document.getElementById('unlockBtn').addEventListener('click', function() {
+    doAction('/admin/unlock', 'unlockBtn', 'controlMsg', 'Unlock');
   });
-  document.getElementById("lockBtn").addEventListener("click", function() {
-    doAction("/admin/lock", "lockBtn", "controlMsg", "Lock");
+  document.getElementById('lockBtn').addEventListener('click', function() {
+    doAction('/admin/lock', 'lockBtn', 'controlMsg', 'Lock');
+  });
+  document.getElementById('rebootBtn').addEventListener('click', function() {
+    doAction('/admin/reboot', 'rebootBtn', 'controlMsg', 'Reboot');
   });
 
-  var otaUrlInput = document.getElementById("otaUrl");
-  var otaBtn      = document.getElementById("otaBtn");
-  var otaMsg      = document.getElementById("otaMsg");
+  var otaUrlInput = document.getElementById('otaUrl');
+  var otaBtn      = document.getElementById('otaBtn');
+  var otaMsg      = document.getElementById('otaMsg');
 
-  otaUrlInput.value = localStorage.getItem("lastOtaUrl") || "";
+  otaUrlInput.value = localStorage.getItem('lastOtaUrl') || '';
 
-  otaBtn.addEventListener("click", function() {
+  otaBtn.addEventListener('click', function() {
     var url = otaUrlInput.value.trim();
-    if (!url) { otaMsg.className = "msg err"; otaMsg.textContent = "Enter a URL."; return; }
-    localStorage.setItem("lastOtaUrl", url);
+    if (!url) { otaMsg.className = 'msg err'; otaMsg.textContent = 'Enter a URL.'; return; }
+    localStorage.setItem('lastOtaUrl', url);
     otaBtn.disabled = true;
-    otaMsg.className = "msg";
-    otaMsg.textContent = "";
-    api("POST", "/admin/ota", { url: url }).then(function() {
-      otaMsg.className = "msg ok";
-      otaMsg.textContent = "OTA command sent — device will reboot shortly.";
+    otaMsg.className = 'msg';
+    otaMsg.textContent = '';
+    api('POST', '/admin/ota', { url: url }).then(function() {
+      otaMsg.className = 'msg ok';
+      otaMsg.textContent = 'OTA command sent — device will reboot shortly.';
     }).catch(function(e) {
-      otaMsg.className = "msg err";
+      otaMsg.className = 'msg err';
       otaMsg.textContent = e.message;
     }).finally(function() {
       otaBtn.disabled = false;
     });
   });
 
-  if (token) { showDashboard(); } else { loginEl.style.display = "flex"; }
+  if (token) { showDashboard(); } else { loginEl.style.display = 'flex'; }
 </script>
 
 </body>
@@ -276,7 +356,21 @@ router.get('/', (req, res) => {
 
 router.get('/status', requireAdmin, (req, res) => {
   const device_id = DEVICE_ID();
-  res.json({ device_id, online: isDeviceOnline(device_id) });
+  const lastSeen  = getDeviceLastSeen(device_id);
+  res.json({
+    device_id,
+    online:   isDeviceOnline(device_id),
+    lastSeen: lastSeen ? lastSeen.toISOString() : null,
+  });
+});
+
+router.get('/stats', requireAdmin, async (req, res) => {
+  try {
+    const stats = await getOrderStats();
+    res.json({ ...stats, itemPriceCents: parseInt(process.env.ITEM_PRICE_CENTS || '0', 10) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 router.get('/orders', requireAdmin, async (req, res) => {
@@ -302,6 +396,34 @@ router.post('/lock', requireAdmin, (req, res) => {
   const device_id = DEVICE_ID();
   try {
     publishLock(device_id);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/reboot', requireAdmin, (req, res) => {
+  const device_id = DEVICE_ID();
+  if (!isDeviceOnline(device_id)) return res.status(503).json({ error: 'Device is offline' });
+  try {
+    publishReboot(device_id);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/refund/:order_id', requireAdmin, async (req, res) => {
+  const { order_id } = req.params;
+  try {
+    const order = await getOrder(order_id);
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+    if (!order.square_payment_id) return res.status(400).json({ error: 'No payment to refund' });
+    if (order.status === 'refunded' || order.status === 'timed_out') {
+      return res.status(400).json({ error: 'Already refunded' });
+    }
+    await createRefund({ payment_id: order.square_payment_id, order_id });
+    await updateOrder(order_id, { status: 'refunded' });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

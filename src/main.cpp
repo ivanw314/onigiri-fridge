@@ -177,7 +177,7 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
     snprintf(canonical, sizeof(canonical),
       "{\"cmd\":\"%s\",\"nonce\":\"%s\",\"ts\":%ld,\"url\":\"%s\"}",
       cmd, nonce, ts, url);
-  } else if (strcmp(cmd, "lock") == 0) {
+  } else if (strcmp(cmd, "lock") == 0 || strcmp(cmd, "reboot") == 0) {
     snprintf(canonical, sizeof(canonical),
       "{\"cmd\":\"%s\",\"nonce\":\"%s\",\"ts\":%ld}",
       cmd, nonce, ts);
@@ -212,6 +212,12 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
   } else if (strcmp(cmd, "lock") == 0) {
     Serial.println("[CMD]  Force lock verified.");
     setState(LOCKED);
+  } else if (strcmp(cmd, "reboot") == 0) {
+    Serial.println("[CMD]  Reboot command verified.");
+    mqtt.publish(TOPIC_EVT, "{\"evt\":\"rebooting\"}");
+    mqtt.loop();
+    delay(200);
+    ESP.restart();
   }
 }
 

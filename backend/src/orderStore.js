@@ -84,6 +84,22 @@ async function getRecentOrders(limit = 20) {
   return rows;
 }
 
+async function getOrderStats() {
+  const [{ rows: todayRows }, { rows: totalRows }] = await Promise.all([
+    pool.query(
+      `SELECT COUNT(*) AS count FROM orders
+       WHERE status = 'complete' AND created_at >= CURRENT_DATE`
+    ),
+    pool.query(
+      `SELECT COUNT(*) AS count FROM orders WHERE status = 'complete'`
+    ),
+  ]);
+  return {
+    todayCount: parseInt(todayRows[0].count, 10),
+    totalCount: parseInt(totalRows[0].count, 10),
+  };
+}
+
 // ── Square event deduplication ────────────────────────────────────────────────
 // Uses INSERT ... ON CONFLICT DO NOTHING for atomic dedup across retries.
 // Returns true if this event_id has already been processed.
@@ -122,6 +138,7 @@ module.exports = {
   getOrder,
   updateOrder,
   getRecentOrders,
+  getOrderStats,
   isDuplicateEvent,
   addSSEClient,
   removeSSEClient,
