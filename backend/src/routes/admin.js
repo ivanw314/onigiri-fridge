@@ -197,15 +197,15 @@ router.get('/', (req, res) => {
     api("GET", "/admin/orders").then(function(orders) {
       var el = document.getElementById("ordersList");
       if (!orders.length) {
-        el.innerHTML = "<p style=\"color:#999;font-size:0.85rem\">No orders yet.</p>";
+        el.innerHTML = '<p style="color:#999;font-size:0.85rem">No orders yet.</p>';
         return;
       }
-      el.innerHTML = "<table><thead><tr><th>ID</th><th>Status</th><th>When</th></tr></thead><tbody>" +
+      el.innerHTML = '<table><thead><tr><th>ID</th><th>Status</th><th>When</th></tr></thead><tbody>' +
         orders.map(function(o) {
-          return "<tr><td>" + o.id.slice(0, 8) + "&hellip;</td>" +
-            "<td><span class=\"badge " + o.status + "\">" + o.status + "</span></td>" +
-            "<td>" + timeAgo(o.created_at) + "</td></tr>";
-        }).join("") + "</tbody></table>";
+          return '<tr><td>' + o.id.slice(0, 8) + '&hellip;</td>' +
+            '<td><span class="badge ' + o.status + '">' + o.status + '</span></td>' +
+            '<td>' + timeAgo(o.created_at) + '</td></tr>';
+        }).join('') + '</tbody></table>';
     }).catch(function() {});
   }
 
