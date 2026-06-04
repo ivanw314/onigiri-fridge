@@ -19,6 +19,32 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+// ── PWA assets ────────────────────────────────────────────────────────────────
+
+router.get('/manifest.json', (req, res) => {
+  res.json({
+    name: 'Fridge Admin',
+    short_name: 'Fridge',
+    start_url: '/admin',
+    scope: '/admin',
+    display: 'standalone',
+    background_color: '#f4f4ef',
+    theme_color: '#111111',
+    icons: [{ src: '/admin/icon.svg', sizes: 'any', type: 'image/svg+xml' }],
+  });
+});
+
+router.get('/icon.svg', (req, res) => {
+  res.setHeader('Content-Type', 'image/svg+xml');
+  res.send(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">' +
+    '<rect width="100" height="100" rx="22" fill="#111"/>' +
+    '<text x="50" y="70" font-family="system-ui,-apple-system,sans-serif" ' +
+    'font-size="56" font-weight="700" text-anchor="middle" fill="#fff">F</text>' +
+    '</svg>'
+  );
+});
+
 // ── HTML page ─────────────────────────────────────────────────────────────────
 
 router.get('/', (req, res) => {
@@ -29,6 +55,13 @@ router.get('/', (req, res) => {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Fridge Admin</title>
+  <meta name="theme-color" content="#111111">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Fridge Admin">
+  <link rel="manifest" href="/admin/manifest.json">
+  <link rel="apple-touch-icon" href="/admin/icon.svg">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: system-ui, -apple-system, sans-serif; background: #f4f4ef; min-height: 100dvh; }
@@ -186,7 +219,7 @@ router.get('/', (req, res) => {
 </div>
 
 <script>
-  var token    = sessionStorage.getItem('adminToken');
+  var token    = localStorage.getItem('adminToken');
   var DEVICEID = '${DEVICE_ID()}';
 
   function api(method, path, body) {
@@ -218,7 +251,7 @@ router.get('/', (req, res) => {
     loginBtn.textContent = 'Signing in...';
     token = passInput.value;
     api('GET', '/admin/status').then(function() {
-      sessionStorage.setItem('adminToken', token);
+      localStorage.setItem('adminToken', token);
       showDashboard();
     }).catch(function(e) {
       loginErr.textContent = e.message;
@@ -230,7 +263,7 @@ router.get('/', (req, res) => {
   }
 
   function doLogout() {
-    sessionStorage.removeItem('adminToken');
+    localStorage.removeItem('adminToken');
     token = null;
     loginEl.style.display = 'flex';
     dashboardEl.style.display = 'none';

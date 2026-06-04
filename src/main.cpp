@@ -12,7 +12,8 @@
 const int            MQTT_PORT         = 8883;
 const int            RELOCK_DELAY_MS   = 1500;
 const unsigned long  UNLOCK_TIMEOUT_MS = 60000;
-const unsigned long  HEARTBEAT_MS      = 30000;
+const unsigned long  HEARTBEAT_MS          = 30000;
+const unsigned long  RECONNECT_INTERVAL_MS = 5000;
 // ─────────────────────────────────────────────────────────────
 
 const int RELAY_PIN = 26;
@@ -29,8 +30,9 @@ enum State { LOCKED, UNLOCKED };
 State state = LOCKED;
 bool lastDoorClosed          = true;
 bool doorOpenedWhileUnlocked = false;
-unsigned long lastHeartbeat  = 0;
-unsigned long unlockedAt     = 0;
+unsigned long lastHeartbeat        = 0;
+unsigned long unlockedAt           = 0;
+unsigned long lastReconnectAttempt = 0;
 
 // ── OTA ───────────────────────────────────────────────────────
 bool otaPending = false;
@@ -254,26 +256,32 @@ void syncTime() {
 }
 
 // ── MQTT connect (also sets Last Will) ───────────────────────
+// Single non-blocking attempt; returns true on success.
+bool tryMqttConnect() {
+  Serial.print("[MQTT] Connecting...");
+  bool ok = mqtt.connect(
+    DEVICE_ID,
+    MQTT_USER, MQTT_PASS,
+    TOPIC_STATUS, 1, true, "offline"
+  );
+  if (ok) {
+    Serial.println(" connected.");
+    mqtt.publish(TOPIC_STATUS, "online", true);
+    mqtt.subscribe(TOPIC_CMD);
+    Serial.print("[MQTT] Subscribed to ");
+    Serial.println(TOPIC_CMD);
+  } else {
+    Serial.print(" failed rc=");
+    Serial.println(mqtt.state());
+  }
+  return ok;
+}
+
+// Blocking connect used at boot and after OTA failure.
 void connectMqtt() {
-  while (!mqtt.connected()) {
-    Serial.print("[MQTT] Connecting...");
-    bool ok = mqtt.connect(
-      DEVICE_ID,
-      MQTT_USER, MQTT_PASS,
-      TOPIC_STATUS, 1, true, "offline"
-    );
-    if (ok) {
-      Serial.println(" connected.");
-      mqtt.publish(TOPIC_STATUS, "online", true);
-      mqtt.subscribe(TOPIC_CMD);
-      Serial.print("[MQTT] Subscribed to ");
-      Serial.println(TOPIC_CMD);
-    } else {
-      Serial.print(" failed rc=");
-      Serial.print(mqtt.state());
-      Serial.println(". Retrying in 5s.");
-      delay(5000);
-    }
+  while (!tryMqttConnect()) {
+    Serial.println("[MQTT] Retrying in 5s.");
+    delay(5000);
   }
 }
 
@@ -329,8 +337,11 @@ void loop() {
   }
 
   if (!mqtt.connected()) {
-    Serial.println("[MQTT] Disconnected -- reconnecting.");
-    connectMqtt();
+    unsigned long now = millis();
+    if (now - lastReconnectAttempt >= RECONNECT_INTERVAL_MS) {
+      lastReconnectAttempt = now;
+      tryMqttConnect();
+    }
   }
   mqtt.loop();
 
