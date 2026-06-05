@@ -421,6 +421,7 @@ void loop() {
       prefs.begin("wifi", false);
       prefs.clear();
       prefs.end();
+      WiFi.disconnect(true); // also erase ESP32's internal WiFi credential flash
       Serial.println("[WIFI] Credentials cleared -- rebooting into setup AP.");
       delay(500);
       ESP.restart();
