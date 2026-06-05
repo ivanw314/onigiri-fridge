@@ -269,6 +269,7 @@ void connectWifi() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[WIFI] Starting setup AP: FridgeSetup");
     WiFiManager wm;
+    wm.resetSettings(); // clear any ESP32-internal saved credentials so portal is forced
     wm.setConfigPortalTimeout(180);
     if (!wm.autoConnect("FridgeSetup")) {
       Serial.println("[WIFI] Setup portal timed out -- rebooting.");
@@ -421,7 +422,6 @@ void loop() {
       prefs.begin("wifi", false);
       prefs.clear();
       prefs.end();
-      WiFi.disconnect(true); // also erase ESP32's internal WiFi credential flash
       Serial.println("[WIFI] Credentials cleared -- rebooting into setup AP.");
       delay(500);
       ESP.restart();
