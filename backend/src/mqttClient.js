@@ -138,7 +138,10 @@ function handleMessage(topic, rawPayload) {
       return; // metadata only — not shown in activity log
     }
 
-    if (event === 'ota_start')  otaPending.add(device_id);
+    if (event === 'ota_start') {
+      otaPending.add(device_id);
+      deviceHeartbeats.delete(device_id); // clean disconnect won't trigger LWT, so force offline state
+    }
     if (event === 'ota_failed') otaPending.delete(device_id);
     pushEvent(device_id, event);
     console.log(`[MQTT] Event from ${device_id}: ${event}`, order_id ? `(order ${order_id})` : '');
@@ -243,6 +246,26 @@ function getDeviceWifiInfo(device_id) {
   return deviceWifiInfo.get(device_id) || null;
 }
 
+function publishWifiReset(device_id) {
+  if (!client?.connected) throw new Error('MQTT client not connected');
+  const secret = process.env.DEVICE_SECRET;
+  if (!secret) throw new Error('DEVICE_SECRET env var not set');
+
+  const payload = {
+    cmd:   'wifi_reset',
+    nonce: uuidv4(),
+    ts:    Math.floor(Date.now() / 1000),
+  };
+  payload.sig = signPayload(payload, secret);
+
+  client.publish(
+    `fridge/${device_id}/cmd`,
+    JSON.stringify(payload),
+    { qos: 1 }
+  );
+  console.log(`[MQTT] Published wifi_reset → ${device_id}`);
+}
+
 function publishWifiUpdate(device_id, ssid, password) {
   if (!client?.connected) throw new Error('MQTT client not connected');
   const secret = process.env.DEVICE_SECRET;
@@ -295,6 +318,7 @@ module.exports = {
   publishLock,
   publishOTA,
   publishReboot,
+  publishWifiReset,
   publishWifiUpdate,
   isDeviceOnline,
   getDeviceLastSeen,

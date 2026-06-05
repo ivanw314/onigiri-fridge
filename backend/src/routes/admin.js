@@ -1,7 +1,7 @@
 'use strict';
 const { Router } = require('express');
 const {
-  publishOTA, publishLock, publishUnlock, publishReboot, publishWifiUpdate,
+  publishOTA, publishLock, publishUnlock, publishReboot, publishWifiUpdate, publishWifiReset,
   isDeviceOnline, getDeviceLastSeen, getDeviceWifiInfo, getRecentEvents,
 } = require('../mqttClient');
 const { getRecentOrders, getOrderStats, getOrder, updateOrder, deleteOrder, deleteAllOrders } = require('../orderStore');
@@ -215,6 +215,9 @@ router.get('/', (req, res) => {
       <input type="password" id="wifiPass" placeholder="Password" autocomplete="new-password">
       <button id="wifiBtn">Update WiFi</button>
       <p class="msg" id="wifiMsg"></p>
+      <hr style="border:none;border-top:1px solid #f0f0f0;margin:1rem 0">
+      <button class="secondary" id="wifiResetBtn" style="color:#c00;border-color:#f5c0c0">&#x26A0;&#xFE0F; Reset WiFi &amp; enter setup mode</button>
+      <p class="msg" id="wifiResetMsg"></p>
     </div>
 
     <div class="card">
@@ -320,7 +323,7 @@ router.get('/', (req, res) => {
 
   function eventColor(evt) {
     if (evt === 'auth_failed' || evt === 'ota_failed' || evt === 'offline' || evt === 'unlock_timeout') return '#c00';
-    if (evt === 'ota_start' || evt === 'rebooting' || evt === 'wifi_updating') return '#b45309';
+    if (evt === 'ota_start' || evt === 'rebooting' || evt === 'wifi_updating' || evt === 'wifi_reset') return '#b45309';
     if (evt === 'online' || evt === 'unlocked' || evt === 'ota_complete') return '#1a7a1a';
     return '#888';
   }
@@ -526,6 +529,26 @@ router.get('/', (req, res) => {
     });
   });
 
+  var wifiResetBtn = document.getElementById('wifiResetBtn');
+  var wifiResetMsg = document.getElementById('wifiResetMsg');
+
+  wifiResetBtn.addEventListener('click', function() {
+    if (!confirm('This will erase WiFi credentials and reboot the device into setup AP mode.\n\nThe fridge will broadcast a "FridgeSetup" network and be offline until reconfigured.\n\nAre you sure?')) return;
+    if (!confirm('Second confirmation: the fridge will go offline now. Proceed?')) return;
+    wifiResetBtn.disabled = true;
+    wifiResetMsg.className = 'msg';
+    wifiResetMsg.textContent = '';
+    api('POST', '/admin/wifi-reset').then(function() {
+      wifiResetMsg.className = 'msg ok';
+      wifiResetMsg.textContent = 'Done — device is rebooting into setup mode.';
+    }).catch(function(e) {
+      wifiResetMsg.className = 'msg err';
+      wifiResetMsg.textContent = e.message;
+    }).finally(function() {
+      wifiResetBtn.disabled = false;
+    });
+  });
+
   if (token) { showDashboard(); } else { loginEl.style.display = 'flex'; }
 </script>
 
@@ -559,6 +582,17 @@ router.post('/wifi', requireAdmin, (req, res) => {
   if (!isDeviceOnline(device_id)) return res.status(503).json({ error: 'Device is offline' });
   try {
     publishWifiUpdate(device_id, ssid, password);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/wifi-reset', requireAdmin, (req, res) => {
+  const device_id = DEVICE_ID();
+  if (!isDeviceOnline(device_id)) return res.status(503).json({ error: 'Device is offline' });
+  try {
+    publishWifiReset(device_id);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
