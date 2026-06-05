@@ -10,6 +10,8 @@
 #include <time.h>
 #include "secrets.h"
 
+#define FIRMWARE_VERSION "1.0.0"
+
 // ── constants (not secrets) ───────────────────────────────────
 const int            MQTT_PORT         = 8883;
 const int            RELOCK_DELAY_MS   = 1500;
@@ -181,7 +183,7 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
     snprintf(canonical, sizeof(canonical),
       "{\"cmd\":\"%s\",\"nonce\":\"%s\",\"ts\":%ld,\"url\":\"%s\"}",
       cmd, nonce, ts, url);
-  } else if (strcmp(cmd, "lock") == 0 || strcmp(cmd, "reboot") == 0) {
+  } else if (strcmp(cmd, "lock") == 0 || strcmp(cmd, "reboot") == 0 || strcmp(cmd, "wifi_reset") == 0) {
     snprintf(canonical, sizeof(canonical),
       "{\"cmd\":\"%s\",\"nonce\":\"%s\",\"ts\":%ld}",
       cmd, nonce, ts);
@@ -241,6 +243,18 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
     prefs.putString("pass", doc["password"] | "");
     prefs.end();
     mqtt.publish(TOPIC_EVT, "{\"evt\":\"wifi_updating\"}");
+    mqtt.loop();
+    delay(200);
+    ESP.restart();
+  } else if (strcmp(cmd, "wifi_reset") == 0) {
+    Serial.println("[CMD]  WiFi reset command verified.");
+    Preferences prefs;
+    prefs.begin("wifi", false);
+    prefs.clear();
+    prefs.end();
+    WiFiManager wm;
+    wm.resetSettings();
+    mqtt.publish(TOPIC_EVT, "{\"evt\":\"wifi_reset\"}");
     mqtt.loop();
     delay(200);
     ESP.restart();
@@ -366,10 +380,10 @@ void setup() {
 
   connectMqtt();
 
-  char wifiEvt[128];
+  char wifiEvt[192];
   snprintf(wifiEvt, sizeof(wifiEvt),
-    "{\"evt\":\"wifi_info\",\"ssid\":\"%s\",\"rssi\":%d}",
-    WiFi.SSID().c_str(), WiFi.RSSI());
+    "{\"evt\":\"wifi_info\",\"ssid\":\"%s\",\"rssi\":%d,\"version\":\"%s\"}",
+    WiFi.SSID().c_str(), WiFi.RSSI(), FIRMWARE_VERSION);
   mqtt.publish(TOPIC_EVT, wifiEvt);
 }
 
