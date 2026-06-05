@@ -359,7 +359,8 @@ router.get('/', (req, res) => {
       if (d.wifi && d.wifi.ssid) {
         var rssi  = d.wifi.rssi;
         var qual  = rssi >= -55 ? 'excellent' : rssi >= -65 ? 'good' : rssi >= -75 ? 'fair' : 'weak';
-        wifiEl.textContent = d.wifi.ssid + '  (' + qual + ', ' + rssi + ' dBm)';
+        var ver   = d.wifi.version ? '  v' + d.wifi.version : '';
+        wifiEl.textContent = d.wifi.ssid + '  (' + qual + ', ' + rssi + ' dBm)' + ver;
       } else {
         wifiEl.textContent = '';
       }

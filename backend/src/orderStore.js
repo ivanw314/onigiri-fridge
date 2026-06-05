@@ -43,7 +43,9 @@ async function initDB() {
 async function getActiveOrderForDevice(device_id) {
   const { rows } = await pool.query(
     `SELECT id FROM orders
-     WHERE device_id = $1 AND status IN ('pending', 'paid', 'dispensing')
+     WHERE device_id = $1
+       AND status IN ('pending', 'paid', 'dispensing')
+       AND created_at > NOW() - INTERVAL '5 minutes'
      ORDER BY created_at DESC LIMIT 1`,
     [device_id]
   );

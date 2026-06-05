@@ -131,9 +131,10 @@ function handleMessage(topic, rawPayload) {
 
     if (event === 'wifi_info' && parsed) {
       deviceWifiInfo.set(device_id, {
-        ssid: parsed.ssid ?? null,
-        rssi: parsed.rssi ?? null,
-        ts:   new Date().toISOString(),
+        ssid:    parsed.ssid    ?? null,
+        rssi:    parsed.rssi    ?? null,
+        version: parsed.version ?? null,
+        ts:      new Date().toISOString(),
       });
       return; // metadata only — not shown in activity log
     }
