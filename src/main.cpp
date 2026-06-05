@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <WiFiManager.h>
+#include <Preferences.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <HTTPUpdate.h>
@@ -183,6 +185,17 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
     snprintf(canonical, sizeof(canonical),
       "{\"cmd\":\"%s\",\"nonce\":\"%s\",\"ts\":%ld}",
       cmd, nonce, ts);
+  } else if (strcmp(cmd, "wifi_update") == 0) {
+    const char* newSsid = doc["ssid"]     | "";
+    const char* newPass = doc["password"] | "";
+    // Keys inserted alphabetically so ArduinoJson preserves order: cmd,nonce,password,ssid,ts
+    JsonDocument cDoc;
+    cDoc["cmd"]      = cmd;
+    cDoc["nonce"]    = nonce;
+    cDoc["password"] = newPass;
+    cDoc["ssid"]     = newSsid;
+    cDoc["ts"]       = ts;
+    serializeJson(cDoc, canonical, sizeof(canonical));
   } else {
     Serial.println("[CMD]  Unrecognised command -- ignored.");
     return;
@@ -220,21 +233,55 @@ void onMqttMessage(char* topic, byte* payload, unsigned int length) {
     mqtt.loop();
     delay(200);
     ESP.restart();
+  } else if (strcmp(cmd, "wifi_update") == 0) {
+    Serial.println("[CMD]  WiFi update command verified.");
+    Preferences prefs;
+    prefs.begin("wifi", false);
+    prefs.putString("ssid", doc["ssid"]     | "");
+    prefs.putString("pass", doc["password"] | "");
+    prefs.end();
+    mqtt.publish(TOPIC_EVT, "{\"evt\":\"wifi_updating\"}");
+    mqtt.loop();
+    delay(200);
+    ESP.restart();
   }
 }
 
 // ── WiFi ──────────────────────────────────────────────────────
 void connectWifi() {
-  Serial.print("[WIFI] Connecting to ");
-  Serial.println(WIFI_SSID);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  Preferences prefs;
+  prefs.begin("wifi", true);
+  String savedSsid = prefs.getString("ssid", "");
+  String savedPass = prefs.getString("pass", "");
+  prefs.end();
+
+  if (savedSsid.length() > 0) {
+    Serial.printf("[WIFI] Trying saved network: %s\n", savedSsid.c_str());
+    WiFi.begin(savedSsid.c_str(), savedPass.c_str());
+    unsigned long t = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - t < 10000) {
+      delay(500);
+      Serial.print(".");
+    }
+    Serial.println();
   }
-  Serial.println();
-  Serial.print("[WIFI] Connected. IP: ");
-  Serial.println(WiFi.localIP());
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[WIFI] Starting setup AP: FridgeSetup");
+    WiFiManager wm;
+    wm.setConfigPortalTimeout(180);
+    if (!wm.autoConnect("FridgeSetup")) {
+      Serial.println("[WIFI] Setup portal timed out -- rebooting.");
+      ESP.restart();
+    }
+    prefs.begin("wifi", false);
+    prefs.putString("ssid", WiFi.SSID());
+    prefs.putString("pass", WiFi.psk());
+    prefs.end();
+  }
+
+  Serial.printf("[WIFI] Connected to %s  IP: %s\n",
+    WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
 }
 
 // ── NTP time sync ─────────────────────────────────────────────
@@ -317,6 +364,12 @@ void setup() {
   mqtt.setBufferSize(512);
 
   connectMqtt();
+
+  char wifiEvt[128];
+  snprintf(wifiEvt, sizeof(wifiEvt),
+    "{\"evt\":\"wifi_info\",\"ssid\":\"%s\",\"rssi\":%d}",
+    WiFi.SSID().c_str(), WiFi.RSSI());
+  mqtt.publish(TOPIC_EVT, wifiEvt);
 }
 
 // ── loop ──────────────────────────────────────────────────────
@@ -362,6 +415,15 @@ void loop() {
     if (c == 'u' && state == LOCKED) {
       Serial.println("[CMD]  Serial unlock.");
       setState(UNLOCKED);
+    }
+    if (c == 'r') {
+      Preferences prefs;
+      prefs.begin("wifi", false);
+      prefs.clear();
+      prefs.end();
+      Serial.println("[WIFI] Credentials cleared -- rebooting into setup AP.");
+      delay(500);
+      ESP.restart();
     }
   }
 

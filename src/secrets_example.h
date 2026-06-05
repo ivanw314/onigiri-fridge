@@ -1,8 +1,8 @@
 #pragma once
 
-// WiFi
-const char* WIFI_SSID = "YOUR_WIFI_SSID";
-const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";
+// WiFi credentials are now stored in NVS via WiFiManager.
+// On first boot, the device creates a "FridgeSetup" AP for provisioning.
+// WIFI_SSID and WIFI_PASS are no longer needed here.
 
 // HiveMQ
 const char* MQTT_HOST = "YOUR_HIVEMQ_CLUSTER.s1.eu.hivemq.cloud";
