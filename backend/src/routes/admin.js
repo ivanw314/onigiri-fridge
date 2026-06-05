@@ -533,8 +533,8 @@ router.get('/', (req, res) => {
   var wifiResetMsg = document.getElementById('wifiResetMsg');
 
   wifiResetBtn.addEventListener('click', function() {
-    if (!confirm('This will erase WiFi credentials and reboot the device into setup AP mode.\n\nThe fridge will broadcast a "FridgeSetup" network and be offline until reconfigured.\n\nAre you sure?')) return;
-    if (!confirm('Second confirmation: the fridge will go offline now. Proceed?')) return;
+    if (!confirm('This will erase WiFi credentials and reboot into setup AP mode. The fridge will be offline until reconfigured. Are you sure?')) return;
+    if (!confirm('Second confirmation: fridge goes offline now. Proceed?')) return;
     wifiResetBtn.disabled = true;
     wifiResetMsg.className = 'msg';
     wifiResetMsg.textContent = '';
