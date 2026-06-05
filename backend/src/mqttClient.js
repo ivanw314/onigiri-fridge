@@ -17,6 +17,7 @@ const pendingOrders = new Map(); // device_id → order_id
 const MAX_EVENTS      = 50;
 const recentEvents    = []; // newest-first ring buffer
 const otaPending      = new Set(); // devices mid-OTA (ota_start seen, not yet back online)
+const deviceWifiInfo  = new Map(); // device_id → { ssid, rssi, ts }
 
 function pushEvent(device_id, event) {
   recentEvents.unshift({ device_id, event, ts: new Date().toISOString() });
@@ -114,20 +115,27 @@ function handleMessage(topic, rawPayload) {
     let event    = null;
     let order_id = null;
 
+    let parsed = null;
     try {
-      // Firmware may eventually publish JSON: { event, order_id }
-      const parsed = JSON.parse(raw);
+      parsed   = JSON.parse(raw);
       event    = parsed.event    ?? parsed.evt ?? null;
       order_id = parsed.order_id ?? null;
     } catch {
-      // Current Phase 2 firmware publishes plain strings: "unlocked", "door_closed", etc.
       event = raw;
     }
 
     if (!event) {
-      // Log the raw payload so we can see exactly what the firmware sent
       console.warn(`[MQTT] Unrecognised evt payload from ${device_id}: ${raw}`);
       return;
+    }
+
+    if (event === 'wifi_info' && parsed) {
+      deviceWifiInfo.set(device_id, {
+        ssid: parsed.ssid ?? null,
+        rssi: parsed.rssi ?? null,
+        ts:   new Date().toISOString(),
+      });
+      return; // metadata only — not shown in activity log
     }
 
     if (event === 'ota_start')  otaPending.add(device_id);
@@ -231,6 +239,32 @@ function getDeviceLastSeen(device_id) {
   return deviceHeartbeats.get(device_id) || null;
 }
 
+function getDeviceWifiInfo(device_id) {
+  return deviceWifiInfo.get(device_id) || null;
+}
+
+function publishWifiUpdate(device_id, ssid, password) {
+  if (!client?.connected) throw new Error('MQTT client not connected');
+  const secret = process.env.DEVICE_SECRET;
+  if (!secret) throw new Error('DEVICE_SECRET env var not set');
+
+  const payload = {
+    cmd:      'wifi_update',
+    nonce:    uuidv4(),
+    ts:       Math.floor(Date.now() / 1000),
+    ssid,
+    password,
+  };
+  payload.sig = signPayload(payload, secret);
+
+  client.publish(
+    `fridge/${device_id}/cmd`,
+    JSON.stringify(payload),
+    { qos: 1 }
+  );
+  console.log(`[MQTT] Published wifi_update → ${device_id} / ssid: ${ssid}`);
+}
+
 function signPayload(payload, secret) {
   const { sig: _omit, ...rest } = payload;
   const canonical = JSON.stringify(
@@ -261,8 +295,10 @@ module.exports = {
   publishLock,
   publishOTA,
   publishReboot,
+  publishWifiUpdate,
   isDeviceOnline,
   getDeviceLastSeen,
+  getDeviceWifiInfo,
   getRecentEvents,
   getPendingOrder,
   clearPendingOrder,

@@ -1,8 +1,8 @@
 'use strict';
 const { Router } = require('express');
 const {
-  publishOTA, publishLock, publishUnlock, publishReboot,
-  isDeviceOnline, getDeviceLastSeen, getRecentEvents,
+  publishOTA, publishLock, publishUnlock, publishReboot, publishWifiUpdate,
+  isDeviceOnline, getDeviceLastSeen, getDeviceWifiInfo, getRecentEvents,
 } = require('../mqttClient');
 const { getRecentOrders, getOrderStats, getOrder, updateOrder, deleteOrder, deleteAllOrders } = require('../orderStore');
 const { createRefund } = require('../square');
@@ -157,6 +157,7 @@ router.get('/', (req, res) => {
           <div>
             <div class="status-main" id="statusText">Checking&#x2026;</div>
             <div class="status-sub"  id="lastSeenText"></div>
+            <div class="status-sub"  id="wifiText"></div>
           </div>
         </div>
         <button class="secondary" id="logoutBtn" style="width:auto;padding:0.4rem 0.9rem;font-size:0.85rem">Sign out</button>
@@ -193,6 +194,14 @@ router.get('/', (req, res) => {
       </div>
       <button id="rebootBtn" class="secondary" style="margin-top:0.6rem">&#x1F504; Reboot device</button>
       <p class="msg" id="controlMsg"></p>
+    </div>
+
+    <div class="card">
+      <h2>WiFi Settings</h2>
+      <input type="text"     id="wifiSsid" placeholder="Network name (SSID)" autocomplete="off">
+      <input type="password" id="wifiPass" placeholder="Password" autocomplete="new-password">
+      <button id="wifiBtn">Update WiFi</button>
+      <p class="msg" id="wifiMsg"></p>
     </div>
 
     <div class="card">
@@ -286,7 +295,7 @@ router.get('/', (req, res) => {
 
   function eventColor(evt) {
     if (evt === 'auth_failed' || evt === 'ota_failed' || evt === 'offline' || evt === 'unlock_timeout') return '#c00';
-    if (evt === 'ota_start' || evt === 'rebooting') return '#b45309';
+    if (evt === 'ota_start' || evt === 'rebooting' || evt === 'wifi_updating') return '#b45309';
     if (evt === 'online' || evt === 'unlocked' || evt === 'ota_complete') return '#1a7a1a';
     return '#888';
   }
@@ -312,12 +321,20 @@ router.get('/', (req, res) => {
 
   function refreshStatus() {
     api('GET', '/admin/status').then(function(d) {
-      var dot  = document.getElementById('dot');
-      var text = document.getElementById('statusText');
-      var sub  = document.getElementById('lastSeenText');
+      var dot     = document.getElementById('dot');
+      var text    = document.getElementById('statusText');
+      var sub     = document.getElementById('lastSeenText');
+      var wifiEl  = document.getElementById('wifiText');
       dot.className    = 'dot ' + (d.online ? 'online' : 'offline');
       text.textContent = (d.online ? 'Online' : 'Offline') + ' — ' + DEVICEID;
       sub.textContent  = d.lastSeen ? 'Last seen ' + timeAgo(d.lastSeen) : '';
+      if (d.wifi && d.wifi.ssid) {
+        var rssi  = d.wifi.rssi;
+        var qual  = rssi >= -55 ? 'excellent' : rssi >= -65 ? 'good' : rssi >= -75 ? 'fair' : 'weak';
+        wifiEl.textContent = d.wifi.ssid + '  (' + qual + ', ' + rssi + ' dBm)';
+      } else {
+        wifiEl.textContent = '';
+      }
     }).catch(function() {});
   }
 
@@ -455,6 +472,34 @@ router.get('/', (req, res) => {
     });
   });
 
+  var wifiSsidInput = document.getElementById('wifiSsid');
+  var wifiPassInput = document.getElementById('wifiPass');
+  var wifiBtn       = document.getElementById('wifiBtn');
+  var wifiMsg       = document.getElementById('wifiMsg');
+
+  wifiBtn.addEventListener('click', function() {
+    var ssid = wifiSsidInput.value.trim();
+    var pass = wifiPassInput.value;
+    if (!ssid || !pass) {
+      wifiMsg.className = 'msg err';
+      wifiMsg.textContent = 'Enter both network name and password.';
+      return;
+    }
+    wifiBtn.disabled = true;
+    wifiMsg.className = 'msg';
+    wifiMsg.textContent = '';
+    api('POST', '/admin/wifi', { ssid: ssid, password: pass }).then(function() {
+      wifiMsg.className = 'msg ok';
+      wifiMsg.textContent = 'Sent — device will reconnect shortly.';
+      wifiPassInput.value = '';
+    }).catch(function(e) {
+      wifiMsg.className = 'msg err';
+      wifiMsg.textContent = e.message;
+    }).finally(function() {
+      wifiBtn.disabled = false;
+    });
+  });
+
   if (token) { showDashboard(); } else { loginEl.style.display = 'flex'; }
 </script>
 
@@ -475,7 +520,23 @@ router.get('/status', requireAdmin, (req, res) => {
     device_id,
     online:   isDeviceOnline(device_id),
     lastSeen: lastSeen ? lastSeen.toISOString() : null,
+    wifi:     getDeviceWifiInfo(device_id),
   });
+});
+
+router.post('/wifi', requireAdmin, (req, res) => {
+  const { ssid, password } = req.body;
+  if (!ssid || !password) return res.status(400).json({ error: 'ssid and password required' });
+  if (ssid.includes('"') || password.includes('"'))
+    return res.status(400).json({ error: 'Credentials may not contain double-quote characters' });
+  const device_id = DEVICE_ID();
+  if (!isDeviceOnline(device_id)) return res.status(503).json({ error: 'Device is offline' });
+  try {
+    publishWifiUpdate(device_id, ssid, password);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 router.get('/stats', requireAdmin, async (req, res) => {
