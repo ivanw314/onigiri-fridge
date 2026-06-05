@@ -615,7 +615,8 @@ router.post('/refund/:order_id', requireAdmin, async (req, res) => {
     if (order.status === 'refunded' || order.status === 'timed_out') {
       return res.status(400).json({ error: 'Already refunded' });
     }
-    await createRefund({ payment_id: order.square_payment_id, order_id });
+    const unitCents = parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
+    await createRefund({ payment_id: order.square_payment_id, order_id, amount_cents: (order.quantity || 1) * unitCents });
     await updateOrder(order_id, { status: 'refunded' });
     res.json({ ok: true });
   } catch (err) {

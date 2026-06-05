@@ -12,6 +12,7 @@ const router = Router();
 // and returns the checkout URL for the browser to redirect to.
 router.post('/', async (req, res) => {
   const { device_id } = req.body;
+  const quantity = Math.max(1, Math.min(10, parseInt(req.body.quantity ?? 1, 10) || 1));
 
   if (!device_id) {
     return res.status(400).json({ error: 'device_id is required' });
@@ -25,20 +26,21 @@ router.post('/', async (req, res) => {
   }
 
   // 1. Create our internal order (status: pending)
-  const order = await createOrder({ device_id });
+  const order = await createOrder({ device_id, quantity });
 
   // 2. Build the Square payment link
   const BASE_URL      = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
-  const amount_cents  = parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
+  const unit_cents    = parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
   const item_name     = process.env.ITEM_NAME || 'Onigiri';
   const redirect_url  = `${BASE_URL}/thank-you?order_id=${order.id}`;
 
   try {
     const { checkout_url, square_order_id } = await createPaymentLink({
       order_id:     order.id,
-      amount_cents,
+      amount_cents: unit_cents,
       item_name,
       redirect_url,
+      quantity,
     });
 
     // Attach the Square order ID so the webhook handler can match it back

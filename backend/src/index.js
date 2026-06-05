@@ -53,7 +53,8 @@ emitter.on('deviceEvent', async ({ device_id, event, order_id: eventOrderId }) =
         const payment_id = order.square_payment_id;
         if (payment_id) {
           try {
-            await createRefund({ payment_id, order_id });
+            const unitCents = parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
+            await createRefund({ payment_id, order_id, amount_cents: (order.quantity || 1) * unitCents });
             console.log(`[REFUND] Square refund issued for order ${order_id}`);
           } catch (err) {
             console.error(`[REFUND] Square refund failed for order ${order_id}:`, err.message);

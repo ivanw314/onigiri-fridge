@@ -21,9 +21,13 @@ async function initDB() {
       square_order_id   TEXT,
       square_payment_id TEXT,
       event_id          TEXT UNIQUE,
+      quantity          INT NOT NULL DEFAULT 1,
       created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
+  `);
+  await pool.query(`
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS quantity INT NOT NULL DEFAULT 1
   `);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS seen_events (
@@ -36,13 +40,13 @@ async function initDB() {
 
 // ── CRUD ──────────────────────────────────────────────────────────────────────
 
-async function createOrder({ device_id }) {
+async function createOrder({ device_id, quantity = 1 }) {
   const id = uuidv4();
   const { rows } = await pool.query(
-    `INSERT INTO orders (id, device_id, status, created_at, updated_at)
-     VALUES ($1, $2, 'pending', NOW(), NOW())
+    `INSERT INTO orders (id, device_id, status, quantity, created_at, updated_at)
+     VALUES ($1, $2, 'pending', $3, NOW(), NOW())
      RETURNING *`,
-    [id, device_id]
+    [id, device_id, quantity]
   );
   const order = rows[0];
   console.log(`[ORDER] Created ${order.id} for device ${device_id}`);

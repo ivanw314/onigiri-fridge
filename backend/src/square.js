@@ -36,7 +36,7 @@ async function squareFetch(path, options = {}) {
 //
 // Returns: { checkout_url, square_order_id }
 
-async function createPaymentLink({ order_id, amount_cents, item_name, redirect_url }) {
+async function createPaymentLink({ order_id, amount_cents, item_name, redirect_url, quantity = 1 }) {
   const { SQUARE_LOCATION_ID } = process.env;
   if (!SQUARE_LOCATION_ID) throw new Error('SQUARE_LOCATION_ID env var not set');
 
@@ -50,7 +50,7 @@ async function createPaymentLink({ order_id, amount_cents, item_name, redirect_u
         line_items: [
           {
             name:     item_name || 'Onigiri',
-            quantity: '1',
+            quantity: String(quantity),
             base_price_money: {
               amount:   amount_cents,
               currency: 'USD',
@@ -84,8 +84,8 @@ async function getSquareOrder(square_order_id) {
 // Issues a full refund for a completed Square payment.
 // Called when an order transitions to 'refunded' after a failed or timed-out unlock.
 
-async function createRefund({ payment_id, order_id }) {
-  const amount_cents = parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
+async function createRefund({ payment_id, order_id, amount_cents }) {
+  const cents = amount_cents ?? parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
   return squareFetch('/v2/refunds', {
     method: 'POST',
     body: JSON.stringify({
@@ -93,7 +93,7 @@ async function createRefund({ payment_id, order_id }) {
       payment_id,
       reason: 'Unlock timeout — item not dispensed',
       amount_money: {
-        amount:   amount_cents,
+        amount:   cents,
         currency: 'USD',
       },
     }),

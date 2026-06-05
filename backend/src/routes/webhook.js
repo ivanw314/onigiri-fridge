@@ -94,7 +94,8 @@ router.post('/square', async (req, res) => {
     await updateOrder(order_id, { status: 'refunded' });
     if (payment.id) {
       try {
-        await createRefund({ payment_id: payment.id, order_id });
+        const unitCents = parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
+        await createRefund({ payment_id: payment.id, order_id, amount_cents: (order.quantity || 1) * unitCents });
         console.log(`[REFUND] Square refund issued for order ${order_id}`);
       } catch (refundErr) {
         console.error(`[REFUND] Square refund failed for order ${order_id}:`, refundErr.message);
