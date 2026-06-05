@@ -1,7 +1,7 @@
 'use strict';
 const { Router } = require('express');
 const { isDeviceOnline } = require('../mqttClient');
-const { createOrder, updateOrder } = require('../orderStore');
+const { createOrder, updateOrder, getActiveOrderForDevice } = require('../orderStore');
 const { createPaymentLink } = require('../square');
 
 const router = Router();
@@ -23,6 +23,11 @@ router.post('/', async (req, res) => {
   // open across a network blip and click Pay after the device went offline.
   if (!isDeviceOnline(device_id)) {
     return res.status(503).json({ error: 'Device is currently offline. Please try again.' });
+  }
+
+  const activeOrder = await getActiveOrderForDevice(device_id);
+  if (activeOrder) {
+    return res.status(409).json({ error: 'An order is already in progress. Please wait for it to finish.' });
   }
 
   // 1. Create our internal order (status: pending)

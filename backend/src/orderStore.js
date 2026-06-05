@@ -40,6 +40,16 @@ async function initDB() {
 
 // ── CRUD ──────────────────────────────────────────────────────────────────────
 
+async function getActiveOrderForDevice(device_id) {
+  const { rows } = await pool.query(
+    `SELECT id FROM orders
+     WHERE device_id = $1 AND status IN ('pending', 'paid', 'dispensing')
+     ORDER BY created_at DESC LIMIT 1`,
+    [device_id]
+  );
+  return rows[0] ?? null;
+}
+
 async function createOrder({ device_id, quantity = 1 }) {
   const id = uuidv4();
   const { rows } = await pool.query(
@@ -149,6 +159,7 @@ function _notifySSEClients(order_id, status) {
 module.exports = {
   initDB,
   createOrder,
+  getActiveOrderForDevice,
   getOrder,
   updateOrder,
   getRecentOrders,
