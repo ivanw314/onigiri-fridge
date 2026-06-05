@@ -98,6 +98,16 @@ router.get('/', (req, res) => {
     .dot { width: 10px; height: 10px; border-radius: 50%; background: #ccc; flex-shrink: 0; }
     .dot.online  { background: #1a7a1a; }
     .dot.offline { background: #c00; }
+    .status-actions { display: flex; gap: 0.4rem; align-items: center; }
+    .icon-btn {
+      background: #fff; color: #111; border: 1.5px solid #e0e0e0; border-radius: 10px;
+      width: 2.1rem; height: 2.1rem; padding: 0; font-size: 1rem; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: opacity 0.15s; flex-shrink: 0;
+    }
+    .icon-btn:hover { opacity: 0.7; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinning { animation: spin 0.5s linear; }
     .stats-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem 1rem; }
     .stat { text-align: center; padding: 0.5rem 0; }
     .stat-num   { font-size: 1.6rem; font-weight: 700; line-height: 1; }
@@ -160,7 +170,10 @@ router.get('/', (req, res) => {
             <div class="status-sub"  id="wifiText"></div>
           </div>
         </div>
-        <button class="secondary" id="logoutBtn" style="width:auto;padding:0.4rem 0.9rem;font-size:0.85rem">Sign out</button>
+        <div class="status-actions">
+          <button class="icon-btn" id="refreshBtn" title="Refresh">&#x21BB;</button>
+          <button class="secondary" id="logoutBtn" style="width:auto;padding:0.4rem 0.9rem;font-size:0.85rem">Sign out</button>
+        </div>
       </div>
     </div>
 
@@ -279,6 +292,18 @@ router.get('/', (req, res) => {
     passInput.value = '';
   }
   document.getElementById('logoutBtn').addEventListener('click', doLogout);
+
+  document.getElementById('refreshBtn').addEventListener('click', function() {
+    var icon = this;
+    icon.classList.remove('spinning');
+    void icon.offsetWidth; // force reflow to restart animation
+    icon.classList.add('spinning');
+    icon.addEventListener('animationend', function() { icon.classList.remove('spinning'); }, { once: true });
+    refreshStatus();
+    refreshStats();
+    refreshOrders();
+    refreshEvents();
+  });
 
   function showDashboard() {
     loginEl.style.display = 'none';
