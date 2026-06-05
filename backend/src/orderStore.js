@@ -101,11 +101,11 @@ async function deleteAllOrders() {
 async function getOrderStats() {
   const [{ rows: todayRows }, { rows: totalRows }] = await Promise.all([
     pool.query(
-      `SELECT COUNT(*) AS count FROM orders
+      `SELECT COALESCE(SUM(quantity), 0) AS count FROM orders
        WHERE status = 'complete' AND created_at >= CURRENT_DATE`
     ),
     pool.query(
-      `SELECT COUNT(*) AS count FROM orders WHERE status = 'complete'`
+      `SELECT COALESCE(SUM(quantity), 0) AS count FROM orders WHERE status = 'complete'`
     ),
   ]);
   return {

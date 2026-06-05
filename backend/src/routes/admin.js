@@ -355,7 +355,7 @@ router.get('/', (req, res) => {
         el.innerHTML = '<p style="color:#999;font-size:0.85rem">No orders yet.</p>';
         return;
       }
-      el.innerHTML = '<table><thead><tr><th>ID</th><th>Status</th><th>When</th><th></th></tr></thead><tbody>' +
+      el.innerHTML = '<table><thead><tr><th>ID</th><th>Status</th><th>Qty</th><th>When</th><th></th></tr></thead><tbody>' +
         orders.map(function(o) {
           var canRefund = o.status === 'complete' || o.status === 'dispensing';
           var action = (canRefund ? '<button class="refund-btn" data-id="' + o.id + '">Refund</button> ' : '') +
@@ -363,6 +363,7 @@ router.get('/', (req, res) => {
           return '<tr>' +
             '<td>' + o.id.slice(0, 8) + '&hellip;</td>' +
             '<td><span class="badge ' + o.status + '">' + o.status + '</span></td>' +
+            '<td>' + (o.quantity || 1) + '</td>' +
             '<td>' + timeAgo(o.created_at) + '</td>' +
             '<td>' + action + '</td>' +
             '</tr>';
