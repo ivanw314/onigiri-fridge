@@ -16,12 +16,49 @@ Every backend → device command (`unlock`, `lock`, `reboot`, `wifi_update`, `wi
 
 ## Hardware
 
+### Components
+
+| Part | Model / spec | Notes |
+|------|---------------|-------|
+| Microcontroller | ESP32 dev board (HiLetgo, 30-pin) | Powered via USB wall wart |
+| Lock | Amazon B0CNPWB8MM, 12V electric drop-bolt | Fail-secure (bolt extends/locks when unpowered). 3 wires: RED (+12V), BLACK (GND), PURPLE (capped — an unused magnetic-induction sensor output, not a trigger) |
+| Relay | DIYables 5V relay module, active-LOW | Switches the 12V supply line to the lock directly, rather than shorting a trigger wire to ground |
+| Door sensor | MC-31B magnetic reed switch | NC/NO labels are reversed from standard convention — identify wires with a multimeter, don't trust the printed labels |
+| Power supply | 12V 2A wall adapter, 5.5×2.1mm barrel jack → screw-terminal adapter | |
+| Wire termination | AITRIP ESP32 breakout board + Joinfworld barrier strip (shared ground bus) | Tinned wire ends on the breakout board (its terminals are too small for ferrule collars); ferrules everywhere else (relay, barrel adapter, barrier strip). The lock's own factory leads were too short to reach the enclosure, so they were extended with soldered, heat-shrunk splices instead of a screw-terminal connection |
+| Enclosure | Plastic takeout container | Boards raised off the floor on electrical-tape pads; barrel adapter mounted outside the box |
+| Mounting | 3M VHB 5952 tape | No drilling into the fridge, fully reversible. Lock is side-mounted with its bolt extending upward into a pad-eye-plate catch on the door — the lock's included magnetic strike plate is set aside, since it interferes with the lock's internal sensor |
+
+### Wiring
+
+**12V side** (PSU → relay → lock):
+
+| From | To | Wire | Termination | Notes |
+|---|---|---|---|---|
+| Barrel adapter + | Relay COM | 20 AWG | Ferrule (relay) | Barrel adapter mounted outside the enclosure |
+| Relay NO | Lock RED | 20 AWG | Ferrule (relay); soldered + heat-shrunk splice (lock extension) | Lock's factory wire was too short and was extended |
+| Barrel adapter − | Lock BLACK | 20 AWG | Ferrule (barrel adapter); soldered + heat-shrunk splice (lock extension) | Lock's factory wire was too short and was extended |
+| Lock PURPLE | — | — | Capped with heat shrink | Not connected |
+
+The relay switches the 12V supply line itself rather than pulling a trigger wire to ground: relay energized → 12V reaches the lock → bolt retracts → **unlocked**. Relay de-energized → lock unpowered → bolt extends (fail-secure) → **locked**.
+
+**Logic side** (ESP32 ↔ relay ↔ door sensor, via the breakout board and barrier strip):
+
+| From | To | Wire | Termination | Notes |
+|---|---|---|---|---|
+| ESP32 VIN | Relay DC+ | 22 AWG | Tinned (breakout board), ferrule (relay) | Logic power |
+| ESP32 GPIO 26 | Relay IN | 22 AWG | Tinned (breakout board), ferrule (relay) | LOW = relay on = unlocked |
+| ESP32 GPIO 27 | MC-31B NC | 20 AWG | Tinned (breakout board), ferrule (sensor) | INPUT_PULLUP, LOW = door closed |
+| ESP32 GND | Barrier strip | 22 AWG | Tinned (breakout board), ferrule (barrier strip) | Feeds common ground bus |
+| Relay DC− | Barrier strip | 22 AWG | Ferrule both ends | |
+| MC-31B COM | Barrier strip | 20 AWG | Ferrule (barrier strip) | Pulled from the 20 AWG color spool — oversized for a signal/ground wire, but fine |
+
+### Pinout
+
 | Component | Pin | Notes |
 |-----------|-----|-------|
-| Relay (electric lock) | GPIO 26 | LOW = locked, HIGH = unlocked |
+| Relay (electric lock) | GPIO 26 | Active-LOW relay: GPIO LOW energizes the relay → unlocked; GPIO HIGH → locked |
 | Magnetic door sensor (reed switch) | GPIO 27 | INPUT_PULLUP — LOW = closed, HIGH = open |
-
-**Platform:** ESP32 dev board, powered via USB or external supply.
 
 ## Firmware (`src/main.cpp`)
 
