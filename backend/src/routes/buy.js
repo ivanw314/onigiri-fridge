@@ -1,19 +1,59 @@
 'use strict';
 const { Router } = require('express');
 const { isDeviceOnline } = require('../mqttClient');
+const { getActiveItems } = require('../itemStore');
 
 const router = Router();
 
-const ITEM_NAME     = () => process.env.ITEM_NAME          || 'Onigiri';
-const PRICE_DISPLAY = () => process.env.ITEM_PRICE_DISPLAY || '$3.00';
+const STORE_NAME = () => process.env.STORE_NAME || process.env.ITEM_NAME || 'Onigiri Fridge';
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
 
 // GET /buy/:device_id
 // Customer scans QR code → lands here.
-// If device is online: show Pay button.
+// If device is online: show the item picker.
 // If device is offline: show unavailable message (no payment taken).
-router.get('/:device_id', (req, res) => {
+router.get('/:device_id', async (req, res) => {
   const { device_id } = req.params;
   const online        = isDeviceOnline(device_id);
+  const items         = online ? await getActiveItems() : [];
+
+  let bodyHtml;
+  if (!online) {
+    bodyHtml = `<p class="hint offline">⚠️ This fridge is currently unavailable.<br>Please try again in a moment.</p>`;
+  } else if (items.length === 0) {
+    bodyHtml = `<p class="hint offline">Nothing available to buy right now.<br>Please check back later.</p>`;
+  } else {
+    const itemListHtml = items.map((it) => {
+      const soldOut = it.stock <= 0;
+      return `<div class="item-option${soldOut ? ' soldout' : ''}" data-id="${it.id}" data-price="${it.price_cents}" data-stock="${it.stock}">
+        <div>
+          <div class="item-option-name">${escapeHtml(it.name)}</div>
+          <div class="item-option-price">$${(it.price_cents / 100).toFixed(2)} each</div>
+        </div>
+        ${soldOut ? '<span class="item-option-badge">Sold out</span>' : ''}
+      </div>`;
+    }).join('');
+
+    bodyHtml = `
+      <div class="item-list" id="itemList">${itemListHtml}</div>
+      <div class="price" id="totalPrice"></div>
+      <div class="unit-price" id="unitPrice"></div>
+      <div class="qty-row">
+        <button class="qty-btn" id="qtyDown">−</button>
+        <span class="qty-num" id="qtyNum">1</span>
+        <button class="qty-btn" id="qtyUp">+</button>
+      </div>
+      <p class="hint">Tap to pay — fridge unlocks instantly</p>
+      <button class="pay-btn" id="payBtn">Pay</button>
+      <p class="error" id="errMsg"></p>`;
+  }
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(`<!DOCTYPE html>
@@ -21,7 +61,7 @@ router.get('/:device_id', (req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${ITEM_NAME()} — Buy Now</title>
+  <title>${escapeHtml(STORE_NAME())} — Buy Now</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -46,6 +86,23 @@ router.get('/:device_id', (req, res) => {
     h1      { font-size: 1.4rem; font-weight: 700; margin-bottom: 0.25rem; }
     .price  { font-size: 2.25rem; font-weight: 800; letter-spacing: -0.03em; margin: 0.75rem 0 0; }
     .unit-price { font-size: 0.8rem; color: #999; margin-bottom: 1rem; }
+    .item-list { display: flex; flex-direction: column; gap: 0.5rem; margin: 1.25rem 0; text-align: left; }
+    .item-option {
+      border: 1.5px solid #e0e0e0;
+      border-radius: 12px;
+      padding: 0.75rem 0.9rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .item-option.selected { border-color: #111; background: #fafafa; }
+    .item-option.soldout  { opacity: 0.5; cursor: not-allowed; }
+    .item-option-name  { font-weight: 600; font-size: 0.95rem; }
+    .item-option-price { font-size: 0.85rem; color: #666; margin-top: 0.1rem; }
+    .item-option-badge { font-size: 0.72rem; color: #c00; font-weight: 700; text-transform: uppercase; white-space: nowrap; }
     .qty-row {
       display: flex;
       align-items: center;
@@ -94,70 +151,79 @@ router.get('/:device_id', (req, res) => {
 <body>
   <div class="card">
     <div class="emoji">🍙</div>
-    <h1>${ITEM_NAME()}</h1>
-    <div class="price" id="totalPrice">${PRICE_DISPLAY()}</div>
-    <div class="unit-price" id="unitPrice"></div>
-    ${online
-      ? `<div class="qty-row">
-           <button class="qty-btn" id="qtyDown">−</button>
-           <span class="qty-num" id="qtyNum">1</span>
-           <button class="qty-btn" id="qtyUp">+</button>
-         </div>
-         <p class="hint">Tap to pay — fridge unlocks instantly</p>
-         <button class="pay-btn" id="payBtn">Pay ${PRICE_DISPLAY()}</button>
-         <p class="error" id="errMsg"></p>`
-      : `<p class="hint offline">⚠️ This fridge is currently unavailable.<br>Please try again in a moment.</p>`
-    }
+    <h1>${escapeHtml(STORE_NAME())}</h1>
+    ${bodyHtml}
   </div>
 
-  ${online ? `<script>
-    var UNIT_CENTS   = ${parseInt(process.env.ITEM_PRICE_CENTS || '300', 10)};
-    var UNIT_DISPLAY = '${PRICE_DISPLAY()}';
+  ${online && items.length ? `<script>
+    var DEVICE_ID = ${JSON.stringify(device_id)};
     var qty = 1;
-    var MAX_QTY = 10;
+    var selected = null;
 
-    var btn       = document.getElementById('payBtn');
-    var errMsg    = document.getElementById('errMsg');
+    var optionEls = Array.prototype.slice.call(document.querySelectorAll('.item-option'));
     var qtyNum    = document.getElementById('qtyNum');
     var qtyDown   = document.getElementById('qtyDown');
     var qtyUp     = document.getElementById('qtyUp');
     var totalEl   = document.getElementById('totalPrice');
     var unitEl    = document.getElementById('unitPrice');
+    var payBtn    = document.getElementById('payBtn');
+    var errMsg    = document.getElementById('errMsg');
 
     function formatCents(cents) {
       return '$' + (cents / 100).toFixed(2);
     }
 
     function updateQty(n) {
-      qty = Math.max(1, Math.min(MAX_QTY, n));
+      if (!selected) return;
+      var maxQty = Math.max(1, Math.min(10, selected.stock));
+      qty = Math.max(1, Math.min(maxQty, n));
       qtyNum.textContent = qty;
       qtyDown.disabled = qty <= 1;
-      qtyUp.disabled   = qty >= MAX_QTY;
-      if (qty === 1) {
-        totalEl.textContent = UNIT_DISPLAY;
-        unitEl.textContent  = '';
-        btn.textContent     = 'Pay ' + UNIT_DISPLAY;
-      } else {
-        var total = formatCents(qty * UNIT_CENTS);
-        totalEl.textContent = total;
-        unitEl.textContent  = UNIT_DISPLAY + ' each';
-        btn.textContent     = 'Pay ' + total;
-      }
+      qtyUp.disabled   = qty >= maxQty;
+      var total = formatCents(qty * selected.price);
+      totalEl.textContent = total;
+      unitEl.textContent  = qty === 1 ? '' : formatCents(selected.price) + ' each';
+      payBtn.textContent  = 'Pay ' + total;
+    }
+
+    function selectItem(el) {
+      if (el.classList.contains('soldout')) return;
+      optionEls.forEach(function(o) { o.classList.remove('selected'); });
+      el.classList.add('selected');
+      selected = {
+        id:    el.getAttribute('data-id'),
+        price: parseInt(el.getAttribute('data-price'), 10),
+        stock: parseInt(el.getAttribute('data-stock'), 10),
+      };
+      payBtn.disabled = false;
+      updateQty(1);
+    }
+
+    optionEls.forEach(function(el) {
+      el.addEventListener('click', function() { selectItem(el); });
+    });
+
+    var firstAvailable = optionEls.find(function(el) { return !el.classList.contains('soldout'); });
+    if (firstAvailable) {
+      selectItem(firstAvailable);
+    } else {
+      payBtn.disabled = true;
+      payBtn.textContent = 'Sold out';
     }
 
     qtyDown.addEventListener('click', function() { updateQty(qty - 1); });
     qtyUp.addEventListener('click',   function() { updateQty(qty + 1); });
-    updateQty(1);
 
-    btn.addEventListener('click', function() {
-      btn.disabled    = true;
-      btn.textContent = 'Starting checkout…';
+    payBtn.addEventListener('click', function() {
+      if (!selected) return;
+      payBtn.disabled    = true;
+      payBtn.textContent = 'Starting checkout…';
       errMsg.textContent = '';
 
       fetch('/api/checkout', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ device_id: '${device_id}', quantity: qty }),
+        body:    JSON.stringify({ device_id: DEVICE_ID, item_id: selected.id, quantity: qty }),
       }).then(function(res) {
         return res.json().then(function(data) {
           if (!res.ok) throw new Error(data.error || 'Checkout failed');
@@ -165,7 +231,7 @@ router.get('/:device_id', (req, res) => {
         });
       }).catch(function(e) {
         errMsg.textContent = e.message;
-        btn.disabled       = false;
+        payBtn.disabled     = false;
         updateQty(qty);
       });
     });

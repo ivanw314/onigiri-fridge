@@ -4,6 +4,7 @@ require('dotenv').config();
 const express = require('express');
 const { connectMQTT, emitter } = require('./mqttClient');
 const { initDB, getOrder, updateOrder } = require('./orderStore');
+const { initItemsTable, restoreStock } = require('./itemStore');
 const { createRefund } = require('./square');
 
 const app = express();
@@ -50,10 +51,11 @@ emitter.on('deviceEvent', async ({ device_id, event, order_id: eventOrderId }) =
         console.warn(`[EVT] Unlock timeout for order ${order_id} — refund needed`);
         await updateOrder(order_id, { status: 'timed_out' });
         clearPendingOrder(device_id);
+        if (order.item_id) await restoreStock(order.item_id, order.quantity || 1);
         const payment_id = order.square_payment_id;
         if (payment_id) {
           try {
-            const unitCents = parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
+            const unitCents = order.unit_price_cents ?? parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
             await createRefund({ payment_id, order_id, amount_cents: (order.quantity || 1) * unitCents });
             console.log(`[REFUND] Square refund issued for order ${order_id}`);
           } catch (err) {
@@ -78,6 +80,7 @@ const PORT = process.env.PORT || 3000;
 
 async function start() {
   await initDB();
+  await initItemsTable();
   await connectMQTT();
   app.listen(PORT, () => console.log(`[SERVER] Listening on port ${PORT}`));
 }

@@ -2,6 +2,7 @@
 const crypto = require('crypto');
 const { Router } = require('express');
 const { getOrder, updateOrder, isDuplicateEvent } = require('../orderStore');
+const { decrementStock, restoreStock } = require('../itemStore');
 const { getSquareOrder, createRefund } = require('../square');
 const { publishUnlock } = require('../mqttClient');
 
@@ -78,7 +79,28 @@ router.post('/square', async (req, res) => {
     return;
   }
 
-  // 7. Mark paid and publish the MQTT unlock command
+  // 7. Decrement stock now that money has actually been captured. If stock ran
+  //    out between checkout creation and payment completion (race with another
+  //    buyer), bail out and refund instead of unlocking for an item we don't have.
+  const unitCents = order.unit_price_cents ?? parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
+  const amount_cents = (order.quantity || 1) * unitCents;
+
+  if (order.item_id) {
+    const updated = await decrementStock(order.item_id, order.quantity || 1);
+    if (!updated) {
+      console.warn(`[WEBHOOK] Out of stock for order ${order_id} — refunding instead of unlocking`);
+      await updateOrder(order_id, { status: 'refunded' });
+      try {
+        await createRefund({ payment_id: payment.id, order_id, amount_cents });
+        console.log(`[REFUND] Square refund issued for order ${order_id} (out of stock)`);
+      } catch (refundErr) {
+        console.error(`[REFUND] Square refund failed for order ${order_id}:`, refundErr.message);
+      }
+      return;
+    }
+  }
+
+  // 8. Mark paid and publish the MQTT unlock command
   await updateOrder(order_id, {
     status:            'paid',
     square_payment_id: payment.id,
@@ -92,10 +114,10 @@ router.post('/square', async (req, res) => {
   } catch (err) {
     console.error(`[WEBHOOK] Failed to publish unlock for ${order_id}:`, err.message);
     await updateOrder(order_id, { status: 'refunded' });
+    if (order.item_id) await restoreStock(order.item_id, order.quantity || 1);
     if (payment.id) {
       try {
-        const unitCents = parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
-        await createRefund({ payment_id: payment.id, order_id, amount_cents: (order.quantity || 1) * unitCents });
+        await createRefund({ payment_id: payment.id, order_id, amount_cents });
         console.log(`[REFUND] Square refund issued for order ${order_id}`);
       } catch (refundErr) {
         console.error(`[REFUND] Square refund failed for order ${order_id}:`, refundErr.message);

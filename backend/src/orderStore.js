@@ -1,11 +1,6 @@
 'use strict';
-const { Pool } = require('pg');
 const { v4: uuidv4 } = require('uuid');
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-});
+const { pool } = require('./db');
 
 // SSE response objects — ephemeral by nature, stays in-memory
 const sseClients = new Map(); // order_id → Set<res>
@@ -30,6 +25,15 @@ async function initDB() {
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS quantity INT NOT NULL DEFAULT 1
   `);
   await pool.query(`
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS item_id UUID
+  `);
+  await pool.query(`
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS item_name TEXT
+  `);
+  await pool.query(`
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS unit_price_cents INT
+  `);
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS seen_events (
       event_id   TEXT PRIMARY KEY,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -52,13 +56,13 @@ async function getActiveOrderForDevice(device_id) {
   return rows[0] ?? null;
 }
 
-async function createOrder({ device_id, quantity = 1 }) {
+async function createOrder({ device_id, quantity = 1, item_id = null, item_name = null, unit_price_cents = null }) {
   const id = uuidv4();
   const { rows } = await pool.query(
-    `INSERT INTO orders (id, device_id, status, quantity, created_at, updated_at)
-     VALUES ($1, $2, 'pending', $3, NOW(), NOW())
+    `INSERT INTO orders (id, device_id, status, quantity, item_id, item_name, unit_price_cents, created_at, updated_at)
+     VALUES ($1, $2, 'pending', $3, $4, $5, $6, NOW(), NOW())
      RETURNING *`,
-    [id, device_id, quantity]
+    [id, device_id, quantity, item_id, item_name, unit_price_cents]
   );
   const order = rows[0];
   console.log(`[ORDER] Created ${order.id} for device ${device_id}`);
@@ -110,19 +114,29 @@ async function deleteAllOrders() {
   return rowCount;
 }
 
-async function getOrderStats() {
+// defaultUnitCents is only used for legacy orders predating per-order price
+// snapshots (unit_price_cents IS NULL) — new orders always carry their own.
+async function getOrderStats(defaultUnitCents) {
   const [{ rows: todayRows }, { rows: totalRows }] = await Promise.all([
     pool.query(
-      `SELECT COALESCE(SUM(quantity), 0) AS count FROM orders
-       WHERE status = 'complete' AND created_at >= CURRENT_DATE`
+      `SELECT COALESCE(SUM(quantity), 0) AS count,
+              COALESCE(SUM(quantity * COALESCE(unit_price_cents, $1)), 0) AS revenue_cents
+       FROM orders
+       WHERE status = 'complete' AND created_at >= CURRENT_DATE`,
+      [defaultUnitCents]
     ),
     pool.query(
-      `SELECT COALESCE(SUM(quantity), 0) AS count FROM orders WHERE status = 'complete'`
+      `SELECT COALESCE(SUM(quantity), 0) AS count,
+              COALESCE(SUM(quantity * COALESCE(unit_price_cents, $1)), 0) AS revenue_cents
+       FROM orders WHERE status = 'complete'`,
+      [defaultUnitCents]
     ),
   ]);
   return {
-    todayCount: parseInt(todayRows[0].count, 10),
-    totalCount: parseInt(totalRows[0].count, 10),
+    todayCount:         parseInt(todayRows[0].count, 10),
+    todayRevenueCents:  parseInt(todayRows[0].revenue_cents, 10),
+    totalCount:         parseInt(totalRows[0].count, 10),
+    totalRevenueCents:  parseInt(totalRows[0].revenue_cents, 10),
   };
 }
 

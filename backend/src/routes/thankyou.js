@@ -1,13 +1,15 @@
 'use strict';
 const { Router } = require('express');
+const { getOrder } = require('../orderStore');
 
 const router = Router();
 
-const ITEM_NAME = () => process.env.ITEM_NAME || 'Onigiri';
-
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   const { order_id } = req.query;
   if (!order_id) return res.redirect('/');
+
+  const order    = await getOrder(order_id);
+  const itemName = order?.item_name || process.env.ITEM_NAME || 'item';
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(`<!DOCTYPE html>
@@ -61,8 +63,8 @@ router.get('/', (req, res) => {
   </div>
 
   <script>
-    const ORDER_ID  = "${order_id}";
-    const ITEM_NAME = "${ITEM_NAME()}";
+    const ORDER_ID  = ${JSON.stringify(order_id)};
+    const ITEM_NAME = ${JSON.stringify(itemName)};
     const statusEl  = document.getElementById('status');
     let done = false;
     let currentStatus = 'pending';

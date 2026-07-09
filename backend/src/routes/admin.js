@@ -5,6 +5,9 @@ const {
   isDeviceOnline, getDeviceLastSeen, getDeviceWifiInfo, getRecentEvents,
 } = require('../mqttClient');
 const { getRecentOrders, getOrderStats, getOrder, updateOrder, deleteOrder, deleteAllOrders } = require('../orderStore');
+const {
+  getAllItems, getItem, createItem, updateItem, deleteItem, itemHasOrders,
+} = require('../itemStore');
 const { createRefund } = require('../square');
 
 const DEVICE_ID = () => process.env.DEVICE_ID || 'onigiri';
@@ -143,6 +146,25 @@ router.get('/', (req, res) => {
     }
     .delete-btn:hover:not(:disabled) { color: #c00; border-color: #f5c0c0; background: #fef0f0; }
     .delete-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .item-card { border-top: 1px solid #f0f0f0; padding: 0.75rem 0 0.25rem; }
+    .item-card:first-child { border-top: none; padding-top: 0; }
+    .item-card input { margin-bottom: 0.5rem; }
+    .item-card.item-inactive { opacity: 0.55; }
+    .item-badge { font-size: 0.72rem; color: #999; margin-left: 0.4rem; }
+    .item-badge.oos { color: #c00; }
+    .item-fields { display: grid; grid-template-columns: 1fr 1fr auto auto; gap: 0.4rem; align-items: center; }
+    .item-fields input { margin-bottom: 0; padding: 0.5rem; font-size: 0.85rem; }
+    .item-save-btn, .item-del-btn, .item-restore-btn {
+      width: auto; padding: 0.5rem 0.6rem; font-size: 0.78rem; border-radius: 8px;
+      font-weight: 500; cursor: pointer; font-family: inherit;
+    }
+    .item-save-btn { background: #fff; color: #111; border: 1px solid #e0e0e0; }
+    .item-save-btn:hover:not(:disabled) { background: #f5f5f5; }
+    .item-del-btn { background: #fff; color: #c00; border: 1px solid #f5c0c0; }
+    .item-del-btn:hover:not(:disabled) { background: #fef0f0; }
+    .item-restore-btn { background: #fff; color: #1a7a1a; border: 1px solid #bfe3bf; }
+    .item-restore-btn:hover:not(:disabled) { background: #eef8ee; }
+    .add-item-form { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #f0f0f0; }
   </style>
 </head>
 <body>
@@ -207,6 +229,18 @@ router.get('/', (req, res) => {
       </div>
       <button id="rebootBtn" class="secondary" style="margin-top:0.6rem">&#x1F504; Reboot device</button>
       <p class="msg" id="controlMsg"></p>
+    </div>
+
+    <div class="card">
+      <h2>Items</h2>
+      <div id="itemsList"><p style="color:#999;font-size:0.85rem">Loading&#x2026;</p></div>
+      <div class="add-item-form">
+        <input type="text" id="newItemName" placeholder="Item name">
+        <input type="number" id="newItemPrice" step="0.01" min="0.01" placeholder="Price ($)">
+        <input type="number" id="newItemStock" step="1" min="0" placeholder="Initial stock">
+        <button id="addItemBtn">Add item</button>
+        <p class="msg" id="addItemMsg"></p>
+      </div>
     </div>
 
     <div class="card">
@@ -305,6 +339,7 @@ router.get('/', (req, res) => {
     refreshStatus();
     refreshStats();
     refreshOrders();
+    refreshItems();
     refreshEvents();
   });
 
@@ -314,10 +349,12 @@ router.get('/', (req, res) => {
     refreshStatus();
     refreshStats();
     refreshOrders();
+    refreshItems();
     refreshEvents();
     setInterval(refreshStatus, 15000);
     setInterval(refreshStats,  60000);
     setInterval(refreshOrders, 30000);
+    setInterval(refreshItems,  30000);
     setInterval(refreshEvents, 10000);
   }
 
@@ -369,11 +406,10 @@ router.get('/', (req, res) => {
 
   function refreshStats() {
     api('GET', '/admin/stats').then(function(s) {
-      var price = (s.itemPriceCents || 0) / 100;
       document.getElementById('statTodayCount').textContent = s.todayCount;
-      document.getElementById('statTodayRev').textContent   = '$' + (s.todayCount  * price).toFixed(2);
+      document.getElementById('statTodayRev').textContent   = '$' + (s.todayRevenueCents / 100).toFixed(2);
       document.getElementById('statTotalCount').textContent = s.totalCount;
-      document.getElementById('statTotalRev').textContent   = '$' + (s.totalCount  * price).toFixed(2);
+      document.getElementById('statTotalRev').textContent   = '$' + (s.totalRevenueCents / 100).toFixed(2);
     }).catch(function() {});
   }
 
@@ -384,13 +420,14 @@ router.get('/', (req, res) => {
         el.innerHTML = '<p style="color:#999;font-size:0.85rem">No orders yet.</p>';
         return;
       }
-      el.innerHTML = '<table><thead><tr><th>ID</th><th>Status</th><th>Qty</th><th>When</th><th></th></tr></thead><tbody>' +
+      el.innerHTML = '<table><thead><tr><th>ID</th><th>Item</th><th>Status</th><th>Qty</th><th>When</th><th></th></tr></thead><tbody>' +
         orders.map(function(o) {
           var canRefund = o.status === 'complete' || o.status === 'dispensing';
           var action = (canRefund ? '<button class="refund-btn" data-id="' + o.id + '">Refund</button> ' : '') +
             '<button class="delete-btn" data-id="' + o.id + '">&#x2715;</button>';
           return '<tr>' +
             '<td>' + o.id.slice(0, 8) + '&hellip;</td>' +
+            '<td>' + (o.item_name || '&#x2014;') + '</td>' +
             '<td><span class="badge ' + o.status + '">' + o.status + '</span></td>' +
             '<td>' + (o.quantity || 1) + '</td>' +
             '<td>' + timeAgo(o.created_at) + '</td>' +
@@ -399,6 +436,100 @@ router.get('/', (req, res) => {
         }).join('') + '</tbody></table>';
     }).catch(function() {});
   }
+
+  function escapeAttr(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+  }
+
+  function refreshItems() {
+    api('GET', '/admin/items').then(function(items) {
+      var el = document.getElementById('itemsList');
+      if (!items.length) {
+        el.innerHTML = '<p style="color:#999;font-size:0.85rem">No items yet.</p>';
+        return;
+      }
+      el.innerHTML = items.map(function(it) {
+        var dollars   = (it.price_cents / 100).toFixed(2);
+        var cardCls   = it.active ? 'item-card' : 'item-card item-inactive';
+        var disabled  = it.active ? '' : 'disabled';
+        var badges    = '';
+        if (!it.active) badges += '<span class="item-badge">Inactive</span>';
+        else if (it.stock <= 0) badges += '<span class="item-badge oos">Out of stock</span>';
+        var actionBtn = it.active
+          ? '<button class="item-del-btn" data-id="' + it.id + '">Delete</button>'
+          : '<button class="item-restore-btn" data-id="' + it.id + '">Restore</button>';
+        return '<div class="' + cardCls + '" data-id="' + it.id + '">' +
+          '<input class="item-name-input" value="' + escapeAttr(it.name) + '" ' + disabled + '>' +
+          badges +
+          '<div class="item-fields">' +
+            '<input class="item-price-input" type="number" step="0.01" min="0.01" value="' + dollars + '" ' + disabled + '>' +
+            '<input class="item-stock-input" type="number" step="1" min="0" value="' + it.stock + '" ' + disabled + '>' +
+            (it.active ? '<button class="item-save-btn" data-id="' + it.id + '">Save</button>' : '') +
+            actionBtn +
+          '</div>' +
+        '</div>';
+      }).join('');
+    }).catch(function() {});
+  }
+
+  document.getElementById('itemsList').addEventListener('click', function(e) {
+    var saveBtn = e.target.closest('.item-save-btn');
+    if (saveBtn) {
+      var card  = saveBtn.closest('.item-card');
+      var id    = saveBtn.getAttribute('data-id');
+      var name  = card.querySelector('.item-name-input').value.trim();
+      var price = parseFloat(card.querySelector('.item-price-input').value);
+      var stock = parseInt(card.querySelector('.item-stock-input').value, 10);
+      if (!name)          { alert('Name cannot be empty.'); return; }
+      if (!(price > 0))   { alert('Enter a valid price.'); return; }
+      if (!(stock >= 0))  { alert('Enter a valid stock amount.'); return; }
+      saveBtn.disabled = true;
+      api('PATCH', '/admin/items/' + id, { name: name, price_cents: Math.round(price * 100), stock: stock })
+        .then(function() { refreshItems(); })
+        .catch(function(err) { alert('Save failed: ' + err.message); saveBtn.disabled = false; });
+      return;
+    }
+    var delBtn = e.target.closest('.item-del-btn');
+    if (delBtn) {
+      var delId = delBtn.getAttribute('data-id');
+      if (!confirm('Delete this item?')) return;
+      delBtn.disabled = true;
+      api('DELETE', '/admin/items/' + delId)
+        .then(function() { refreshItems(); })
+        .catch(function(err) { alert('Delete failed: ' + err.message); delBtn.disabled = false; });
+      return;
+    }
+    var restoreBtn = e.target.closest('.item-restore-btn');
+    if (restoreBtn) {
+      var restoreId = restoreBtn.getAttribute('data-id');
+      restoreBtn.disabled = true;
+      api('PATCH', '/admin/items/' + restoreId, { active: true })
+        .then(function() { refreshItems(); })
+        .catch(function(err) { alert('Restore failed: ' + err.message); restoreBtn.disabled = false; });
+    }
+  });
+
+  document.getElementById('addItemBtn').addEventListener('click', function() {
+    var name  = document.getElementById('newItemName').value.trim();
+    var price = parseFloat(document.getElementById('newItemPrice').value);
+    var stock = parseInt(document.getElementById('newItemStock').value, 10);
+    var msg   = document.getElementById('addItemMsg');
+    if (!name)         { flashMsg(msg, 'msg err', 'Enter an item name.', 4000); return; }
+    if (!(price > 0))  { flashMsg(msg, 'msg err', 'Enter a valid price.', 4000); return; }
+    if (!(stock >= 0)) { flashMsg(msg, 'msg err', 'Enter a valid stock amount.', 4000); return; }
+    var btn = document.getElementById('addItemBtn');
+    btn.disabled = true;
+    api('POST', '/admin/items', { name: name, price_cents: Math.round(price * 100), stock: stock })
+      .then(function() {
+        document.getElementById('newItemName').value  = '';
+        document.getElementById('newItemPrice').value = '';
+        document.getElementById('newItemStock').value = '';
+        flashMsg(msg, 'msg ok', 'Item added.', 3000);
+        refreshItems();
+      })
+      .catch(function(err) { flashMsg(msg, 'msg err', err.message, 5000); })
+      .finally(function() { btn.disabled = false; });
+  });
 
   document.getElementById('ordersList').addEventListener('click', function(e) {
     var refundBtn = e.target.closest('.refund-btn');
@@ -451,18 +582,27 @@ router.get('/', (req, res) => {
     return Math.floor(s / 86400) + 'd ago';
   }
 
+  function flashMsg(el, cls, text, ms) {
+    if (el._clearTimer) { clearTimeout(el._clearTimer); el._clearTimer = null; }
+    el.className = cls;
+    el.textContent = text;
+    if (ms) {
+      el._clearTimer = setTimeout(function() {
+        el.textContent = '';
+        el.className = 'msg';
+      }, ms);
+    }
+  }
+
   function doAction(path, btnId, msgId, label) {
     var btn = document.getElementById(btnId);
     var msg = document.getElementById(msgId);
     btn.disabled = true;
-    msg.className = 'msg';
-    msg.textContent = '';
+    flashMsg(msg, 'msg', '', 0);
     api('POST', path).then(function() {
-      msg.className = 'msg ok';
-      msg.textContent = label + ' sent.';
+      flashMsg(msg, 'msg ok', label + ' sent.', 4000);
     }).catch(function(e) {
-      msg.className = 'msg err';
-      msg.textContent = e.message;
+      flashMsg(msg, 'msg err', e.message, 5000);
     }).finally(function() {
       btn.disabled = false;
     });
@@ -486,17 +626,14 @@ router.get('/', (req, res) => {
 
   otaBtn.addEventListener('click', function() {
     var url = otaUrlInput.value.trim();
-    if (!url) { otaMsg.className = 'msg err'; otaMsg.textContent = 'Enter a URL.'; return; }
+    if (!url) { flashMsg(otaMsg, 'msg err', 'Enter a URL.', 4000); return; }
     localStorage.setItem('lastOtaUrl', url);
     otaBtn.disabled = true;
-    otaMsg.className = 'msg';
-    otaMsg.textContent = '';
+    flashMsg(otaMsg, 'msg', '', 0);
     api('POST', '/admin/ota', { url: url }).then(function() {
-      otaMsg.className = 'msg ok';
-      otaMsg.textContent = 'OTA command sent — device will reboot shortly.';
+      flashMsg(otaMsg, 'msg ok', 'OTA command sent — device will reboot shortly.', 5000);
     }).catch(function(e) {
-      otaMsg.className = 'msg err';
-      otaMsg.textContent = e.message;
+      flashMsg(otaMsg, 'msg err', e.message, 5000);
     }).finally(function() {
       otaBtn.disabled = false;
     });
@@ -511,20 +648,16 @@ router.get('/', (req, res) => {
     var ssid = wifiSsidInput.value.trim();
     var pass = wifiPassInput.value;
     if (!ssid || !pass) {
-      wifiMsg.className = 'msg err';
-      wifiMsg.textContent = 'Enter both network name and password.';
+      flashMsg(wifiMsg, 'msg err', 'Enter both network name and password.', 4000);
       return;
     }
     wifiBtn.disabled = true;
-    wifiMsg.className = 'msg';
-    wifiMsg.textContent = '';
+    flashMsg(wifiMsg, 'msg', '', 0);
     api('POST', '/admin/wifi', { ssid: ssid, password: pass }).then(function() {
-      wifiMsg.className = 'msg ok';
-      wifiMsg.textContent = 'Sent — device will reconnect shortly.';
+      flashMsg(wifiMsg, 'msg ok', 'Sent — device will reconnect shortly.', 5000);
       wifiPassInput.value = '';
     }).catch(function(e) {
-      wifiMsg.className = 'msg err';
-      wifiMsg.textContent = e.message;
+      flashMsg(wifiMsg, 'msg err', e.message, 5000);
     }).finally(function() {
       wifiBtn.disabled = false;
     });
@@ -537,14 +670,11 @@ router.get('/', (req, res) => {
     if (!confirm('This will erase WiFi credentials and reboot into setup AP mode. The fridge will be offline until reconfigured. Are you sure?')) return;
     if (!confirm('Second confirmation: fridge goes offline now. Proceed?')) return;
     wifiResetBtn.disabled = true;
-    wifiResetMsg.className = 'msg';
-    wifiResetMsg.textContent = '';
+    flashMsg(wifiResetMsg, 'msg', '', 0);
     api('POST', '/admin/wifi-reset').then(function() {
-      wifiResetMsg.className = 'msg ok';
-      wifiResetMsg.textContent = 'Done — device is rebooting into setup mode.';
+      flashMsg(wifiResetMsg, 'msg ok', 'Done — device is rebooting into setup mode.', 5000);
     }).catch(function(e) {
-      wifiResetMsg.className = 'msg err';
-      wifiResetMsg.textContent = e.message;
+      flashMsg(wifiResetMsg, 'msg err', e.message, 5000);
     }).finally(function() {
       wifiResetBtn.disabled = false;
     });
@@ -602,8 +732,77 @@ router.post('/wifi-reset', requireAdmin, (req, res) => {
 
 router.get('/stats', requireAdmin, async (req, res) => {
   try {
-    const stats = await getOrderStats();
-    res.json({ ...stats, itemPriceCents: parseInt(process.env.ITEM_PRICE_CENTS || '0', 10) });
+    const defaultUnitCents = parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
+    const stats = await getOrderStats(defaultUnitCents);
+    res.json(stats);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Items ─────────────────────────────────────────────────────────────────────
+
+router.get('/items', requireAdmin, async (req, res) => {
+  try {
+    res.json(await getAllItems());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/items', requireAdmin, async (req, res) => {
+  const name  = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+  const price = parseInt(req.body.price_cents, 10);
+  const stock = parseInt(req.body.stock, 10);
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  if (!Number.isFinite(price) || price <= 0) return res.status(400).json({ error: 'price_cents must be a positive integer' });
+  if (!Number.isInteger(stock) || stock < 0) return res.status(400).json({ error: 'stock must be a non-negative integer' });
+  try {
+    const item = await createItem({ name, price_cents: price, stock });
+    res.json(item);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.patch('/items/:id', requireAdmin, async (req, res) => {
+  const updates = {};
+  if (req.body.name !== undefined) {
+    const name = String(req.body.name).trim();
+    if (!name) return res.status(400).json({ error: 'name cannot be empty' });
+    updates.name = name;
+  }
+  if (req.body.price_cents !== undefined) {
+    const price = parseInt(req.body.price_cents, 10);
+    if (!Number.isFinite(price) || price <= 0) return res.status(400).json({ error: 'price_cents must be a positive integer' });
+    updates.price_cents = price;
+  }
+  if (req.body.stock !== undefined) {
+    const stock = parseInt(req.body.stock, 10);
+    if (!Number.isInteger(stock) || stock < 0) return res.status(400).json({ error: 'stock must be a non-negative integer' });
+    updates.stock = stock;
+  }
+  if (req.body.active !== undefined) updates.active = !!req.body.active;
+  if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No valid fields to update' });
+  try {
+    res.json(await updateItem(req.params.id, updates));
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
+});
+
+// Hard-deletes items with no order history; otherwise deactivates so past
+// orders that reference this item keep their name/price intact.
+router.delete('/items/:id', requireAdmin, async (req, res) => {
+  try {
+    const item = await getItem(req.params.id);
+    if (!item) return res.status(404).json({ error: 'Item not found' });
+    if (await itemHasOrders(item.id)) {
+      await updateItem(item.id, { active: false });
+      return res.json({ ok: true, deactivated: true });
+    }
+    await deleteItem(item.id);
+    res.json({ ok: true, deactivated: false });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -676,7 +875,7 @@ router.post('/refund/:order_id', requireAdmin, async (req, res) => {
     if (order.status === 'refunded' || order.status === 'timed_out') {
       return res.status(400).json({ error: 'Already refunded' });
     }
-    const unitCents = parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
+    const unitCents = order.unit_price_cents ?? parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
     await createRefund({ payment_id: order.square_payment_id, order_id, amount_cents: (order.quantity || 1) * unitCents });
     await updateOrder(order_id, { status: 'refunded' });
     res.json({ ok: true });
