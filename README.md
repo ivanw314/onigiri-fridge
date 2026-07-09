@@ -1,6 +1,18 @@
-# Onigiri Fridge — Phase 1
+# Onigiri Fridge
 
-An ESP32-based smart fridge lock that can be unlocked remotely over MQTT/WiFi. The lock re-engages automatically once the door is opened and closed after an unlock command.
+An ESP32-controlled, WiFi-connected mini fridge for unattended vending. Customers scan a QR code, pick an item and quantity, pay via Square, and the fridge unlocks itself over MQTT. A mobile-friendly admin panel handles remote control, WiFi provisioning, firmware updates, and the item catalog.
+
+## How It Works
+
+1. Customer scans a QR code linking to `/buy/:device_id`.
+2. The page lists every active catalog item with live stock; out-of-stock items are shown disabled. The customer picks one item + quantity and pays via a Square-hosted checkout link.
+3. Square's webhook (`POST /webhooks/square`) confirms payment, atomically decrements that item's stock, and publishes a signed `unlock` command over MQTT.
+4. The ESP32 verifies the command's HMAC signature and nonce, releases the lock relay, and reports `unlocked`.
+5. The customer opens the door, takes their item(s), and closes it — the fridge relocks automatically ~1.5s after the door is confirmed shut.
+6. If the door is never opened within 60s, the device reports `unlock_timeout`; the backend refunds the payment automatically and reverses the stock decrement.
+7. The customer's browser (`/thank-you`) shows live status throughout via Server-Sent Events.
+
+Every backend → device command (`unlock`, `lock`, `reboot`, `wifi_update`, `wifi_reset`, `ota`) is HMAC-SHA256 signed with a shared device secret, timestamp-checked (±30s, once NTP has synced), and nonce-checked (replay protection) by the firmware before it's executed.
 
 ## Hardware
 
@@ -11,103 +23,114 @@ An ESP32-based smart fridge lock that can be unlocked remotely over MQTT/WiFi. T
 
 **Platform:** ESP32 dev board, powered via USB or external supply.
 
-## How It Works
+## Firmware (`src/main.cpp`)
 
-1. On boot the device connects to WiFi and then to an MQTT broker.
-2. It publishes `online` to `fridge/onigiri/status` (retained) and subscribes to `fridge/onigiri/cmd`.
-3. Sending an `unlock` payload to the command topic releases the relay.
-4. Once the door is opened **and then closed**, the relay re-engages automatically.
-5. A heartbeat is published to `fridge/onigiri/status` every 30 seconds.
-6. All state transitions are published as JSON events to `fridge/onigiri/evt`.
+- **WiFi provisioning** — no hardcoded credentials. On first boot (or after a reset) the device starts a `FridgeSetup` WiFiManager captive portal; credentials are saved to NVS (`Preferences`, namespace `"wifi"`) and reused on later boots. Remote re-provisioning: the `wifi_update` command saves new credentials and reboots; `wifi_reset` clears NVS + WiFiManager's own store and reboots into the setup AP. The same reset is available locally via the serial console (`r` key).
+- **MQTT topics** — namespaced by the device's `DEVICE_ID` (from `secrets.h`):
 
-### MQTT Topics
+  | Topic | Direction | Payload |
+  |-------|-----------|---------|
+  | `fridge/<id>/cmd` | Subscribe | Signed JSON command |
+  | `fridge/<id>/evt` | Publish | `{"evt": "..."}` state/event notifications |
+  | `fridge/<id>/status` | Publish (retained, Last Will) | `online` / `offline` |
 
-| Topic | Direction | Example payload |
-|-------|-----------|-----------------|
-| `fridge/onigiri/cmd` | Subscribe | `unlock` |
-| `fridge/onigiri/evt` | Publish | `{"evt":"unlocked"}` / `{"evt":"locked"}` |
-| `fridge/onigiri/status` | Publish (retained) | `online` / `offline` (Last Will) |
+- **Command authentication** (`onMqttMessage` → `verifyHMAC`) — every incoming command needs a timestamp within 30s of the device's NTP-synced clock, an unseen nonce (8-entry ring buffer), and a valid HMAC-SHA256 signature over the canonical (alphabetically sorted) JSON keys, computed with `DEVICE_SECRET`. Any failure publishes `auth_failed` and drops the command.
+- **OTA updates** — the `ota` command triggers a lock-and-flush sequence: the device locks, publishes `ota_start`, cleanly disconnects, downloads and flashes the given URL, then reboots. On failure it reconnects and publishes `ota_failed`.
+- **Heartbeat** — `online` published (retained) every 30s; MQTT's Last Will publishes `offline` on an ungraceful disconnect.
+- **Serial debug console** (115200 baud) — `u` triggers a manual unlock, `r` clears WiFi credentials and reboots into setup mode. Logs are prefixed by subsystem: `[LOCK]`, `[WIFI]`, `[MQTT]`, `[DOOR]`, `[CMD]`, `[AUTH]`, `[OTA]`, `[SNTP]`.
+- **`src/secrets.h`** (gitignored — copy from `src/secrets_example.h`): `MQTT_HOST`, `MQTT_USER`, `MQTT_PASS`, `DEVICE_ID`, `DEVICE_SECRET`.
 
-## Build & Flash
+### Build & Flash
 
 Requires [PlatformIO](https://platformio.org/).
 
 ```bash
-# Install dependencies and build
-pio run
-
-# Flash to connected ESP32
-pio run --target upload
-
-# Open serial monitor (115200 baud)
-pio device monitor
+pio run                  # build
+pio run --target upload  # flash to connected ESP32
+pio device monitor       # serial monitor (115200 baud)
 ```
 
-The upload and monitor ports are set to `/dev/tty.usbserial-0001` in [platformio.ini](platformio.ini). Change these to match your system if needed.
+Upload/monitor ports default to `/dev/tty.usbserial-0001` in [platformio.ini](platformio.ini) — override to match your system.
 
-### Dependencies
+## Backend (`backend/`)
 
-- [PubSubClient](https://github.com/knolleary/pubsubclient) v2.8 (MQTT client)
-- Arduino framework for ESP32 (managed by PlatformIO)
+Node.js/Express on Railway. HiveMQ Cloud (MQTT over TLS), Postgres, Square Payments.
 
-## Configuration
+| File | Responsibility |
+|------|-----------------|
+| `src/index.js` | Express entry point; wires up routes; MQTT device-event handler (order state transitions, stock restore on timeout) |
+| `src/db.js` | Shared Postgres connection pool |
+| `src/orderStore.js` | Orders table CRUD, stats, Square-event dedup, SSE client registry |
+| `src/itemStore.js` | Items catalog CRUD, atomic stock decrement/restore |
+| `src/mqttClient.js` | HiveMQ connection, HMAC command signing/publishing, device heartbeat + activity-event tracking |
+| `src/square.js` | Square payment links, order lookup, refunds |
+| `src/routes/buy.js` | `GET /buy/:device_id` — multi-item storefront |
+| `src/routes/checkout.js` | `POST /api/checkout` — creates an order + Square payment link |
+| `src/routes/webhook.js` | `POST /webhooks/square` — payment confirmation, stock decrement, triggers unlock |
+| `src/routes/thankyou.js` | `GET /thank-you` — post-payment live status page (SSE) |
+| `src/routes/orders.js` | `GET /api/orders/:id/status` — SSE stream + poll fallback |
+| `src/routes/admin.js` | Admin panel (PWA) + all `/admin/*` management APIs |
 
-WiFi credentials, MQTT broker details, and pin assignments are currently hardcoded in [src/main.cpp](src/main.cpp). Update these before flashing:
+### Order lifecycle
 
-```cpp
-// WiFi
-const char* ssid     = "your-ssid";
-const char* password = "your-password";
+`pending → paid → dispensing → complete`, or `→ timed_out` (60s unlock timeout, auto-refunded) / `→ refunded` (manual refund, or an error-path refund).
 
-// MQTT broker
-const char* mqttHost = "your-broker-host";
-const int   mqttPort = 8883;
-const char* mqttUser = "your-mqtt-user";
-const char* mqttPass = "your-mqtt-password";
-```
+### Items catalog & stock
 
-The broker connection uses `WiFiClientSecure` with `setInsecure()` (no certificate pinning). See the roadmap below.
+The product catalog lives in Postgres (`items` table: `name`, `price_cents`, `stock`, `active`), managed from the admin panel's **Items** card — add, edit, deactivate/restore, or delete items. On an empty database the catalog auto-seeds one row from the `ITEM_NAME` / `ITEM_PRICE_CENTS` env vars, so existing deployments keep working with no manual step.
 
-## Serial Debug Console
+- The `/buy` page lists every active item with live stock; out-of-stock items are shown disabled rather than hidden, and the quantity stepper is capped at remaining stock.
+- Stock decrements atomically the moment Square confirms payment (not at checkout-link creation), so two concurrent buyers can't oversell the last unit. If the decrement fails (a stock race, or an unlock command fails to send) the order is refunded automatically instead of unlocking.
+- Stock is restored automatically only when a paid order never dispenses (unlock-publish failure, or the device's `unlock_timeout` event) — never for manual refunds of already-dispensed orders, since the item may already be physically gone.
+- Every order snapshots the item's name/price at purchase time, so later catalog edits or deletions never change historical order display, revenue stats, or refund amounts.
+- Deleting an item hard-deletes it if it has no order history, otherwise deactivates it (hidden from the storefront, restorable later) to keep past orders intact.
 
-With the serial monitor open, press **`u`** to trigger a manual unlock — useful for local testing without an MQTT broker.
+### Admin panel (`/admin`)
 
-Log lines are prefixed by subsystem: `[LOCK]`, `[WIFI]`, `[MQTT]`, `[DOOR]`, `[CMD]`.
+Installable PWA, Bearer-token auth (`ADMIN_SECRET`), persistent login via localStorage.
 
-## Roadmap
+- **Status** — online/offline, last-seen, WiFi SSID/signal/firmware version, manual refresh
+- **Sales** — today's / all-time items sold and revenue (computed from each order's snapshotted price)
+- **Controls** — Unlock, Lock, Reboot
+- **Items** — catalog CRUD, stock editing, add/delete
+- **WiFi Settings** — remote credential update, factory reset (double-confirm)
+- **Firmware Update** — OTA trigger by URL
+- **Recent Orders** — item, status, quantity, timestamp; refund / delete per row, clear all
+- **Activity** — color-coded recent device events, auto-refreshing
 
-- **Phase 1 (current):** WiFi + MQTT unlock, door auto-relock, heartbeat
-- **Stage 2:** Externalize credentials (NVS / provisioning flow)
-- **Stage 3:** TLS certificate pinning, HMAC command authentication
+### Environment variables
+
+See [`backend/.env.example`](backend/.env.example) for the full annotated list — server/database/HiveMQ/Square/admin secrets, plus `ITEM_NAME` / `ITEM_PRICE_CENTS` (legacy catalog-seed + fallback only) and the optional `STORE_NAME`.
 
 ## Repository Structure
 
 ```
 onigiri-fridge-phase1/
 ├── src/
-│   └── main.cpp                    # ESP32 firmware
-├── include/                        # Reserved for future header files
-├── lib/                            # Reserved for local libraries
-├── test/                           # Reserved for unit tests
-├── platformio.ini                  # Firmware build & upload config
+│   ├── main.cpp                 # ESP32 firmware
+│   ├── secrets.h                # Device credentials (gitignored)
+│   └── secrets_example.h        # Template for secrets.h
+├── platformio.ini               # Firmware build & upload config
 │
 ├── backend/
 │   ├── src/
-│   │   ├── index.js                # Express entry point + MQTT device event handler
-│   │   ├── mqttClient.js           # HiveMQ TLS connection, publishUnlock (HMAC-SHA256), heartbeat tracking
-│   │   ├── orderStore.js           # In-memory order store + SSE client management
-│   │   ├── square.js               # createPaymentLink, getSquareOrder
+│   │   ├── index.js             # Express entry + MQTT device-event handler
+│   │   ├── db.js                # Shared Postgres pool
+│   │   ├── orderStore.js        # Orders: CRUD, stats, event dedup, SSE registry
+│   │   ├── itemStore.js         # Items catalog: CRUD, stock decrement/restore
+│   │   ├── mqttClient.js        # HiveMQ connection, HMAC signing, event tracking
+│   │   ├── square.js            # Payment links, order lookup, refunds
 │   │   └── routes/
-│   │       ├── buy.js              # GET /buy/:device_id — landing page with online/offline guard
-│   │       ├── checkout.js         # POST /api/checkout — create order + Square payment link
-│   │       ├── orders.js           # GET /api/orders/:id/status — SSE stream + poll fallback
-│   │       ├── thankyou.js         # GET /thank-you — post-payment page, SSEs for unlock event
-│   │       └── webhook.js          # POST /webhooks/square — HMAC verify, dedup, trigger unlock
+│   │       ├── buy.js           # GET /buy/:device_id — item picker + checkout
+│   │       ├── checkout.js      # POST /api/checkout
+│   │       ├── webhook.js       # POST /webhooks/square
+│   │       ├── thankyou.js      # GET /thank-you — live status page
+│   │       ├── orders.js        # GET /api/orders/:id/status — SSE
+│   │       └── admin.js         # Admin panel + /admin/* APIs
 │   ├── package.json
-│   ├── railway.toml                # Railway hosting config
+│   ├── railway.toml             # Railway hosting config
 │   └── .env.example
 │
 ├── .gitignore
-├── .gitattributes
 └── README.md
 ```
