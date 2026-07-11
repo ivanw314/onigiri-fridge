@@ -152,16 +152,16 @@ router.get('/', (req, res) => {
     .item-card.item-inactive { opacity: 0.55; }
     .item-badge { font-size: 0.72rem; color: #999; margin-left: 0.4rem; }
     .item-badge.oos { color: #c00; }
-    .item-fields { display: grid; grid-template-columns: 1fr 1fr auto auto; gap: 0.4rem; align-items: center; }
-    .item-fields input { margin-bottom: 0; padding: 0.5rem; font-size: 0.85rem; }
-    .item-save-btn, .item-del-btn, .item-restore-btn {
+    .item-fields { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+    .item-fields input { flex: 1 1 70px; min-width: 60px; margin-bottom: 0; padding: 0.5rem; font-size: 0.85rem; }
+    .item-save-btn, .item-del-btn, .item-restore-btn, .item-purge-btn {
       width: auto; padding: 0.5rem 0.6rem; font-size: 0.78rem; border-radius: 8px;
       font-weight: 500; cursor: pointer; font-family: inherit;
     }
     .item-save-btn { background: #fff; color: #111; border: 1px solid #e0e0e0; }
     .item-save-btn:hover:not(:disabled) { background: #f5f5f5; }
-    .item-del-btn { background: #fff; color: #c00; border: 1px solid #f5c0c0; }
-    .item-del-btn:hover:not(:disabled) { background: #fef0f0; }
+    .item-del-btn, .item-purge-btn { background: #fff; color: #c00; border: 1px solid #f5c0c0; }
+    .item-del-btn:hover:not(:disabled), .item-purge-btn:hover:not(:disabled) { background: #fef0f0; }
     .item-restore-btn { background: #fff; color: #1a7a1a; border: 1px solid #bfe3bf; }
     .item-restore-btn:hover:not(:disabled) { background: #eef8ee; }
     .add-item-form { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #f0f0f0; }
@@ -462,7 +462,8 @@ router.get('/', (req, res) => {
         else if (it.stock <= 0) badges += '<span class="item-badge oos">Out of stock</span>';
         var actionBtn = it.active
           ? '<button class="item-del-btn" data-id="' + it.id + '">Delete</button>'
-          : '<button class="item-restore-btn" data-id="' + it.id + '">Restore</button>';
+          : '<button class="item-restore-btn" data-id="' + it.id + '">Restore</button>' +
+            '<button class="item-purge-btn" data-id="' + it.id + '">Delete permanently</button>';
         return '<div class="' + cardCls + '" data-id="' + it.id + '">' +
           '<input class="item-name-input" value="' + escapeAttr(it.name) + '" ' + disabled + '>' +
           badges +
@@ -511,6 +512,18 @@ router.get('/', (req, res) => {
       api('PATCH', '/admin/items/' + restoreId, { active: true })
         .then(function() { refreshItems(); })
         .catch(function(err) { alert('Restore failed: ' + err.message); restoreBtn.disabled = false; });
+      return;
+    }
+    var purgeBtn = e.target.closest('.item-purge-btn');
+    if (purgeBtn) {
+      var purgeId   = purgeBtn.getAttribute('data-id');
+      var purgeCard = purgeBtn.closest('.item-card');
+      var purgeName = purgeCard.querySelector('.item-name-input').value;
+      if (!confirm('Permanently delete "' + purgeName + '"? This cannot be undone. Past orders will keep showing its name and price, but you will not be able to restore it.')) return;
+      purgeBtn.disabled = true;
+      api('DELETE', '/admin/items/' + purgeId + '?force=true')
+        .then(function() { refreshItems(); })
+        .catch(function(err) { alert('Delete failed: ' + err.message); purgeBtn.disabled = false; });
     }
   });
 
@@ -796,12 +809,18 @@ router.patch('/items/:id', requireAdmin, async (req, res) => {
 });
 
 // Hard-deletes items with no order history; otherwise deactivates so past
-// orders that reference this item keep their name/price intact.
+// orders that reference this item keep their name/price intact (order_items
+// already snapshots item_name/unit_price_cents itself, so this is really
+// just to keep the Items list from silently losing a row admin might want
+// to restore). ?force=true skips that safety check and always hard-deletes
+// — safe to do at any time since order_items has no foreign key back to
+// items and never looks the live row up again after checkout.
 router.delete('/items/:id', requireAdmin, async (req, res) => {
   try {
     const item = await getItem(req.params.id);
     if (!item) return res.status(404).json({ error: 'Item not found' });
-    if (await itemHasOrders(item.id)) {
+    const force = req.query.force === 'true';
+    if (!force && await itemHasOrders(item.id)) {
       await updateItem(item.id, { active: false });
       return res.json({ ok: true, deactivated: true });
     }
