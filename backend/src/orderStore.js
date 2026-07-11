@@ -53,7 +53,7 @@ async function getActiveOrderForDevice(device_id) {
     `SELECT id FROM orders
      WHERE device_id = $1
        AND status IN ('pending', 'paid', 'dispensing')
-       AND created_at > NOW() - INTERVAL '5 minutes'
+       AND created_at > NOW() - INTERVAL '2 minutes'
      ORDER BY created_at DESC LIMIT 1`,
     [device_id]
   );
