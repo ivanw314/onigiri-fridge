@@ -161,7 +161,9 @@ router.get('/:device_id', async (req, res) => {
   </div>
 
   ${online && items.length ? `<script>
-    var DEVICE_ID = ${JSON.stringify(device_id)};
+    var DEVICE_ID    = ${JSON.stringify(device_id)};
+    var CART_KEY     = 'onigiri_cart_' + DEVICE_ID;
+    var PENDING_KEY  = 'onigiri_checkout_pending_' + DEVICE_ID;
     var cart = {}; // item_id -> { price, maxQty, qty }
 
     var rows    = Array.prototype.slice.call(document.querySelectorAll('.item-row'));
@@ -176,6 +178,42 @@ router.get('/:device_id', async (req, res) => {
         maxQty: parseInt(row.getAttribute('data-max'), 10),
         qty:    0,
       };
+    });
+
+    // Restore quantities from a previous visit — e.g. the customer went to
+    // Square checkout, then came back to add something they forgot.
+    (function restoreCart() {
+      var saved;
+      try { saved = JSON.parse(sessionStorage.getItem(CART_KEY) || '{}'); } catch (e) { saved = {}; }
+      Object.keys(saved).forEach(function(id) {
+        if (!cart[id]) return;
+        cart[id].qty = Math.max(0, Math.min(cart[id].maxQty, saved[id] || 0));
+        var qtyEl = document.querySelector('[data-qty-for="' + id + '"]');
+        if (qtyEl) qtyEl.textContent = cart[id].qty;
+      });
+    })();
+
+    function saveCart() {
+      var toSave = {};
+      Object.keys(cart).forEach(function(id) { toSave[id] = cart[id].qty; });
+      try { sessionStorage.setItem(CART_KEY, JSON.stringify(toSave)); } catch (e) { /* storage unavailable */ }
+    }
+
+    // Runs on every page view, including a browser back-navigation restored
+    // from bfcache (which doesn't re-run the script above). If we left for
+    // Square checkout and are now back, free up the pending order right
+    // away instead of leaving the customer stuck until the timeout sweep.
+    window.addEventListener('pageshow', function() {
+      if (!sessionStorage.getItem(PENDING_KEY)) return;
+      sessionStorage.removeItem(PENDING_KEY);
+      payBtn.disabled    = false;
+      errMsg.textContent = '';
+      recompute();
+      fetch('/api/checkout/cancel', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ device_id: DEVICE_ID }),
+      }).catch(function() { /* best effort — timeout sweep is the fallback */ });
     });
 
     function formatCents(cents) {
@@ -203,6 +241,7 @@ router.get('/:device_id', async (req, res) => {
         row.qty = Math.max(0, Math.min(row.maxQty, next));
         document.querySelector('[data-qty-for="' + id + '"]').textContent = row.qty;
         recompute();
+        saveCart();
       });
     });
 
@@ -223,6 +262,10 @@ router.get('/:device_id', async (req, res) => {
       }).then(function(res) {
         return res.json().then(function(data) {
           if (!res.ok) throw new Error(data.error || 'Checkout failed');
+          // Mark this checkout as in-flight so that if the customer backs
+          // out of Square to edit their cart, the pageshow handler above
+          // knows to free up the pending order instead of waiting it out.
+          sessionStorage.setItem(PENDING_KEY, '1');
           window.location.href = data.checkout_url;
         });
       }).catch(function(e) {

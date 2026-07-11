@@ -1,7 +1,7 @@
 'use strict';
 const { Router } = require('express');
 const { isDeviceOnline } = require('../mqttClient');
-const { createOrder, addOrderItems, updateOrder, getActiveOrderForDevice } = require('../orderStore');
+const { createOrder, addOrderItems, updateOrder, getActiveOrderForDevice, cancelPendingOrderForDevice } = require('../orderStore');
 const { getItem } = require('../itemStore');
 const { createPaymentLink } = require('../square');
 
@@ -107,6 +107,22 @@ router.post('/', async (req, res) => {
     await updateOrder(order.id, { status: 'refunded' });
     return res.status(502).json({ error: 'Could not create checkout. Please try again.' });
   }
+});
+
+// POST /api/checkout/cancel
+// Body: { device_id }
+// Called when a customer backs out of the Square checkout page (e.g. to go
+// add a forgotten item to the cart). Frees up the device's pending order
+// immediately rather than making them wait out the abandonment timeout.
+// A no-op if the order already advanced past 'pending' (paid, etc.) or
+// there's nothing pending at all.
+router.post('/cancel', async (req, res) => {
+  const { device_id } = req.body;
+  if (!device_id) {
+    return res.status(400).json({ error: 'device_id is required' });
+  }
+  await cancelPendingOrderForDevice(device_id);
+  res.json({ ok: true });
 });
 
 module.exports = router;

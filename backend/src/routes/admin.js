@@ -125,7 +125,8 @@ router.get('/', (req, res) => {
     .badge.complete   { background: #e6f4e6; color: #1a7a1a; }
     .badge.dispensing,
     .badge.paid       { background: #e8f0fe; color: #1a5cbf; }
-    .badge.pending    { background: #f5f5f5; color: #666; }
+    .badge.pending,
+    .badge.cancelled  { background: #f5f5f5; color: #666; }
     .badge.timed_out,
     .badge.refunded   { background: #fde8e8; color: #c00; }
     .refund-btn {

@@ -66,6 +66,26 @@ async function getActiveOrderForDevice(device_id) {
   return rows[0] ?? null;
 }
 
+// Lets a customer who backed out of Square checkout (e.g. to go add a
+// forgotten item) free their device up immediately instead of waiting out
+// the timeout sweep. No payment was taken yet, so this is just a status
+// flip — no refund or stock restore needed. Scoped to status = 'pending'
+// so it can never cancel an order that's already been paid.
+async function cancelPendingOrderForDevice(device_id) {
+  const { rows } = await pool.query(
+    `UPDATE orders SET status = 'cancelled', updated_at = NOW()
+     WHERE device_id = $1 AND status = 'pending'
+     RETURNING id`,
+    [device_id]
+  );
+  const order = rows[0] ?? null;
+  if (order) {
+    console.log(`[ORDER] Cancelled ${order.id} for device ${device_id} (customer returned to edit cart)`);
+    _notifySSEClients(order.id, 'cancelled');
+  }
+  return order;
+}
+
 // Flips orders that were created but never paid within the timeout window
 // over to 'timed_out'. No refund or stock restore needed here — stock is
 // only decremented once the Square webhook confirms payment (see
@@ -236,6 +256,7 @@ module.exports = {
   createOrder,
   addOrderItems,
   getActiveOrderForDevice,
+  cancelPendingOrderForDevice,
   expireStalePendingOrders,
   getOrder,
   updateOrder,
