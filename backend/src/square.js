@@ -29,6 +29,50 @@ async function squareFetch(path, options = {}) {
   return data;
 }
 
+// ── Tax lookup ────────────────────────────────────────────────────────────────
+// Mirrors whatever sales tax rate is already configured on the physical
+// Square terminal's catalog, instead of hardcoding a percentage that can
+// drift out of sync with the dashboard. Cached in memory — tax codes change
+// at most a few times a year, not worth a Square API call on every checkout.
+
+const TAX_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+let taxCache = { catalogObjectId: null, fetchedAt: 0 };
+
+async function getTaxCatalogObjectId() {
+  if (Date.now() - taxCache.fetchedAt < TAX_CACHE_TTL_MS) {
+    return taxCache.catalogObjectId;
+  }
+
+  try {
+    const data = await squareFetch('/v2/catalog/list?types=TAX');
+    const enabledTaxes = (data.objects || []).filter((o) => o.tax_data?.enabled !== false);
+
+    let match;
+    if (process.env.SQUARE_TAX_NAME) {
+      match = enabledTaxes.find((o) => o.tax_data?.name === process.env.SQUARE_TAX_NAME);
+      if (!match) {
+        console.error(`[SQUARE] No enabled catalog tax named "${process.env.SQUARE_TAX_NAME}" found — charging no tax`);
+      }
+    } else if (enabledTaxes.length === 1) {
+      match = enabledTaxes[0];
+    } else if (enabledTaxes.length > 1) {
+      console.error(
+        '[SQUARE] Multiple enabled catalog taxes found — set SQUARE_TAX_NAME to pick one:',
+        enabledTaxes.map((o) => o.tax_data?.name).join(', ')
+      );
+    }
+
+    taxCache = { catalogObjectId: match?.id ?? null, fetchedAt: Date.now() };
+  } catch (err) {
+    console.error('[SQUARE] Failed to refresh tax catalog, keeping last known value:', err.message);
+    // Don't let a transient API failure drop tax entirely — just retry on
+    // the next TTL window instead of hammering Square with retries now.
+    taxCache = { ...taxCache, fetchedAt: Date.now() };
+  }
+
+  return taxCache.catalogObjectId;
+}
+
 // ── createPaymentLink ─────────────────────────────────────────────────────────
 // Creates a Square hosted checkout URL covering one or more distinct items
 // (a cart). order_id is stored as reference_id on the Square order so we can
@@ -40,6 +84,11 @@ async function squareFetch(path, options = {}) {
 async function createPaymentLink({ order_id, line_items, redirect_url }) {
   const { SQUARE_LOCATION_ID } = process.env;
   if (!SQUARE_LOCATION_ID) throw new Error('SQUARE_LOCATION_ID env var not set');
+
+  const taxCatalogObjectId = await getTaxCatalogObjectId();
+  const taxes = taxCatalogObjectId
+    ? [{ uid: 'sales_tax', catalog_object_id: taxCatalogObjectId, scope: 'ORDER' }]
+    : undefined;
 
   const data = await squareFetch('/v2/online-checkout/payment-links', {
     method: 'POST',
@@ -56,6 +105,7 @@ async function createPaymentLink({ order_id, line_items, redirect_url }) {
             currency: 'USD',
           },
         })),
+        ...(taxes ? { taxes } : {}),
       },
       checkout_options: {
         redirect_url,

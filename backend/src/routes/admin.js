@@ -899,7 +899,10 @@ router.post('/refund/:order_id', requireAdmin, async (req, res) => {
     if (order.status === 'refunded' || order.status === 'timed_out') {
       return res.status(400).json({ error: 'Already refunded' });
     }
-    const amount_cents = order.items.reduce((sum, it) => sum + it.quantity * it.unit_price_cents, 0);
+    // total_cents is the amount Square actually charged (includes tax);
+    // fall back to the pre-tax item sum only for orders that predate that
+    // column being populated.
+    const amount_cents = order.total_cents ?? order.items.reduce((sum, it) => sum + it.quantity * it.unit_price_cents, 0);
     await createRefund({ payment_id: order.square_payment_id, order_id, amount_cents });
     await updateOrder(order_id, { status: 'refunded' });
     res.json({ ok: true });

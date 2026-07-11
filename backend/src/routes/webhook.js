@@ -109,7 +109,9 @@ async function handleSquareWebhook(req) {
   //    between checkout creation and payment completion (race with another
   //    buyer), none of it is taken, and we refund instead of unlocking for
   //    items we don't have.
-  const amount_cents = order.items.reduce((sum, it) => sum + it.quantity * it.unit_price_cents, 0);
+  // Use the amount Square actually charged (includes tax) rather than
+  // re-summing order_items, which is pre-tax and would short-refund.
+  const amount_cents = payment.amount_money?.amount ?? order.items.reduce((sum, it) => sum + it.quantity * it.unit_price_cents, 0);
   const stockLines = order.items.filter((it) => it.item_id).map((it) => ({ item_id: it.item_id, quantity: it.quantity }));
 
   if (stockLines.length > 0) {
@@ -132,6 +134,7 @@ async function handleSquareWebhook(req) {
     status:            'paid',
     square_payment_id: payment.id,
     square_order_id:   payment.order_id,
+    total_cents:       amount_cents,
   });
 
   try {

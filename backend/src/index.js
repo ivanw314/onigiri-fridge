@@ -56,7 +56,10 @@ emitter.on('deviceEvent', async ({ device_id, event, order_id: eventOrderId }) =
         const payment_id = order.square_payment_id;
         if (payment_id) {
           try {
-            const amount_cents = order.items.reduce((sum, it) => sum + it.quantity * it.unit_price_cents, 0);
+            // total_cents is the amount Square actually charged (includes
+            // tax); fall back to the pre-tax item sum only for orders that
+            // predate that column being populated.
+            const amount_cents = order.total_cents ?? order.items.reduce((sum, it) => sum + it.quantity * it.unit_price_cents, 0);
             await createRefund({ payment_id, order_id, amount_cents });
             console.log(`[REFUND] Square refund issued for order ${order_id}`);
           } catch (err) {

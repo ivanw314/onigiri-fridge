@@ -37,6 +37,11 @@ async function initDB() {
   await pool.query(`ALTER TABLE orders DROP COLUMN IF EXISTS item_name`);
   await pool.query(`ALTER TABLE orders DROP COLUMN IF EXISTS unit_price_cents`);
   await pool.query(`ALTER TABLE orders DROP COLUMN IF EXISTS quantity`);
+  // The actual amount Square charged (line items + tax), captured once the
+  // webhook marks an order 'paid'. Refunds use this instead of re-summing
+  // order_items, since that sum is pre-tax and would short-refund the
+  // customer once sales tax is added at checkout.
+  await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS total_cents INT`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS seen_events (
       event_id   TEXT PRIMARY KEY,
