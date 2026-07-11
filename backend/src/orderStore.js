@@ -48,16 +48,41 @@ async function initDB() {
 
 // ── CRUD ──────────────────────────────────────────────────────────────────────
 
+// A pending order that's never paid within this window is considered
+// abandoned. Kept as a single constant since it's checked in two places:
+// deciding whether a device still has an order "in progress", and sweeping
+// stale rows over to 'timed_out' so they don't sit there as 'pending' forever.
+const PENDING_ORDER_TIMEOUT_MINUTES = 2;
+
 async function getActiveOrderForDevice(device_id) {
   const { rows } = await pool.query(
     `SELECT id FROM orders
      WHERE device_id = $1
        AND status IN ('pending', 'paid', 'dispensing')
-       AND created_at > NOW() - INTERVAL '2 minutes'
+       AND created_at > NOW() - INTERVAL '${PENDING_ORDER_TIMEOUT_MINUTES} minutes'
      ORDER BY created_at DESC LIMIT 1`,
     [device_id]
   );
   return rows[0] ?? null;
+}
+
+// Flips orders that were created but never paid within the timeout window
+// over to 'timed_out'. No refund or stock restore needed here — stock is
+// only decremented once the Square webhook confirms payment (see
+// webhook.js), so an order still 'pending' at this point never touched it.
+async function expireStalePendingOrders() {
+  const { rows } = await pool.query(
+    `SELECT id FROM orders
+     WHERE status = 'pending'
+       AND created_at <= NOW() - INTERVAL '${PENDING_ORDER_TIMEOUT_MINUTES} minutes'`
+  );
+  for (const { id } of rows) {
+    await updateOrder(id, { status: 'timed_out' });
+  }
+  if (rows.length > 0) {
+    console.log(`[ORDER] Expired ${rows.length} stale pending order(s)`);
+  }
+  return rows.length;
 }
 
 async function createOrder({ device_id }) {
@@ -211,6 +236,7 @@ module.exports = {
   createOrder,
   addOrderItems,
   getActiveOrderForDevice,
+  expireStalePendingOrders,
   getOrder,
   updateOrder,
   getRecentOrders,

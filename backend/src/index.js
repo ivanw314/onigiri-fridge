@@ -3,7 +3,7 @@ require('dotenv').config();
 
 const express = require('express');
 const { connectMQTT, emitter } = require('./mqttClient');
-const { initDB, getOrder, updateOrder } = require('./orderStore');
+const { initDB, getOrder, updateOrder, expireStalePendingOrders } = require('./orderStore');
 const { initItemsTable, restoreStockForItems } = require('./itemStore');
 const { createRefund } = require('./square');
 
@@ -83,6 +83,15 @@ async function start() {
   await initDB();
   await initItemsTable();
   await connectMQTT();
+
+  // Sweep abandoned pending orders (checkout started, never paid) over to
+  // 'timed_out' so they don't sit as 'pending' forever in the dashboard.
+  setInterval(() => {
+    expireStalePendingOrders().catch((err) => {
+      console.error('[ORDER] Failed to expire stale pending orders:', err.message);
+    });
+  }, 30 * 1000);
+
   app.listen(PORT, () => console.log(`[SERVER] Listening on port ${PORT}`));
 }
 
