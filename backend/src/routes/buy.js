@@ -17,7 +17,8 @@ function escapeHtml(s) {
 
 // GET /buy/:device_id
 // Customer scans QR code → lands here.
-// If device is online: show the item picker.
+// If device is online: show the cart — each item gets its own qty stepper,
+// so a customer can buy several different items in one purchase.
 // If device is offline: show unavailable message (no payment taken).
 router.get('/:device_id', async (req, res) => {
   const { device_id } = req.params;
@@ -30,28 +31,33 @@ router.get('/:device_id', async (req, res) => {
   } else if (items.length === 0) {
     bodyHtml = `<p class="hint offline">Nothing available to buy right now.<br>Please check back later.</p>`;
   } else {
-    const itemListHtml = items.map((it) => {
+    const itemRowsHtml = items.map((it) => {
       const soldOut = it.stock <= 0;
-      return `<div class="item-option${soldOut ? ' soldout' : ''}" data-id="${it.id}" data-price="${it.price_cents}" data-stock="${it.stock}">
-        <div>
-          <div class="item-option-name">${escapeHtml(it.name)}</div>
-          <div class="item-option-price">$${(it.price_cents / 100).toFixed(2)} each</div>
+      const maxQty  = Math.min(10, it.stock);
+      return `<div class="item-row${soldOut ? ' soldout' : ''}" data-id="${it.id}" data-price="${it.price_cents}" data-max="${maxQty}">
+        <div class="item-row-info">
+          <div class="item-row-name">${escapeHtml(it.name)}</div>
+          <div class="item-row-price">$${(it.price_cents / 100).toFixed(2)} each</div>
         </div>
-        ${soldOut ? '<span class="item-option-badge">Sold out</span>' : ''}
+        ${soldOut
+          ? '<span class="item-option-badge">Sold out</span>'
+          : `<div class="item-row-qty">
+               <button class="qty-btn small" data-action="down" data-id="${it.id}">−</button>
+               <span class="qty-num small" data-qty-for="${it.id}">0</span>
+               <button class="qty-btn small" data-action="up" data-id="${it.id}">+</button>
+             </div>`
+        }
       </div>`;
     }).join('');
 
     bodyHtml = `
-      <div class="item-list" id="itemList">${itemListHtml}</div>
-      <div class="price" id="totalPrice"></div>
-      <div class="unit-price" id="unitPrice"></div>
-      <div class="qty-row">
-        <button class="qty-btn" id="qtyDown">−</button>
-        <span class="qty-num" id="qtyNum">1</span>
-        <button class="qty-btn" id="qtyUp">+</button>
+      <div class="item-list" id="itemList">${itemRowsHtml}</div>
+      <div class="cart-total-row">
+        <span>Total</span>
+        <span id="totalPrice">$0.00</span>
       </div>
-      <p class="hint">Tap to pay — fridge unlocks instantly</p>
-      <button class="pay-btn" id="payBtn">Pay</button>
+      <p class="hint">Tap + to add items — fridge unlocks instantly</p>
+      <button class="pay-btn" id="payBtn" disabled>Select items to pay</button>
       <p class="error" id="errMsg"></p>`;
   }
 
@@ -84,32 +90,21 @@ router.get('/:device_id', async (req, res) => {
     }
     .emoji  { font-size: 3rem; line-height: 1; margin-bottom: 0.75rem; }
     h1      { font-size: 1.4rem; font-weight: 700; margin-bottom: 0.25rem; }
-    .price  { font-size: 2.25rem; font-weight: 800; letter-spacing: -0.03em; margin: 0.75rem 0 0; }
-    .unit-price { font-size: 0.8rem; color: #999; margin-bottom: 1rem; }
     .item-list { display: flex; flex-direction: column; gap: 0.5rem; margin: 1.25rem 0; text-align: left; }
-    .item-option {
+    .item-row {
       border: 1.5px solid #e0e0e0;
       border-radius: 12px;
-      padding: 0.75rem 0.9rem;
+      padding: 0.65rem 0.85rem;
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 0.5rem;
-      cursor: pointer;
-      transition: border-color 0.15s, background 0.15s;
     }
-    .item-option.selected { border-color: #111; background: #fafafa; }
-    .item-option.soldout  { opacity: 0.5; cursor: not-allowed; }
-    .item-option-name  { font-weight: 600; font-size: 0.95rem; }
-    .item-option-price { font-size: 0.85rem; color: #666; margin-top: 0.1rem; }
+    .item-row.soldout { opacity: 0.5; }
+    .item-row-name  { font-weight: 600; font-size: 0.95rem; }
+    .item-row-price { font-size: 0.82rem; color: #666; margin-top: 0.1rem; }
     .item-option-badge { font-size: 0.72rem; color: #c00; font-weight: 700; text-transform: uppercase; white-space: nowrap; }
-    .qty-row {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 1rem;
-      margin-bottom: 1.25rem;
-    }
+    .item-row-qty { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
     .qty-btn {
       background: #f0f0f0;
       color: #111;
@@ -126,9 +121,19 @@ router.get('/:device_id', async (req, res) => {
       padding: 0;
       transition: background 0.15s;
     }
+    .qty-btn.small { width: 1.8rem; height: 1.8rem; font-size: 1rem; }
     .qty-btn:hover:not(:disabled) { background: #e0e0e0; }
     .qty-btn:disabled { color: #bbb; cursor: not-allowed; }
     .qty-num { font-size: 1.5rem; font-weight: 700; min-width: 2rem; text-align: center; }
+    .qty-num.small { font-size: 1.05rem; min-width: 1.3rem; }
+    .cart-total-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 1.15rem;
+      font-weight: 700;
+      margin: 0.5rem 0 1rem;
+    }
     .hint   { font-size: 0.85rem; color: #777; margin-bottom: 1.5rem; line-height: 1.4; }
     .hint.offline { color: #c00; }
     button.pay-btn {
@@ -143,7 +148,7 @@ router.get('/:device_id', async (req, res) => {
       width: 100%;
       transition: opacity 0.15s;
     }
-    button.pay-btn:hover   { opacity: 0.8; }
+    button.pay-btn:hover:not(:disabled) { opacity: 0.8; }
     button.pay-btn:disabled { background: #bbb; cursor: not-allowed; opacity: 1; }
     .error { color: #c00; font-size: 0.85rem; margin-top: 1rem; min-height: 1.2em; }
   </style>
@@ -157,73 +162,64 @@ router.get('/:device_id', async (req, res) => {
 
   ${online && items.length ? `<script>
     var DEVICE_ID = ${JSON.stringify(device_id)};
-    var qty = 1;
-    var selected = null;
+    var cart = {}; // item_id -> { price, maxQty, qty }
 
-    var optionEls = Array.prototype.slice.call(document.querySelectorAll('.item-option'));
-    var qtyNum    = document.getElementById('qtyNum');
-    var qtyDown   = document.getElementById('qtyDown');
-    var qtyUp     = document.getElementById('qtyUp');
-    var totalEl   = document.getElementById('totalPrice');
-    var unitEl    = document.getElementById('unitPrice');
-    var payBtn    = document.getElementById('payBtn');
-    var errMsg    = document.getElementById('errMsg');
+    var rows    = Array.prototype.slice.call(document.querySelectorAll('.item-row'));
+    var totalEl = document.getElementById('totalPrice');
+    var payBtn  = document.getElementById('payBtn');
+    var errMsg  = document.getElementById('errMsg');
+
+    rows.forEach(function(row) {
+      var id = row.getAttribute('data-id');
+      cart[id] = {
+        price:  parseInt(row.getAttribute('data-price'), 10),
+        maxQty: parseInt(row.getAttribute('data-max'), 10),
+        qty:    0,
+      };
+    });
 
     function formatCents(cents) {
       return '$' + (cents / 100).toFixed(2);
     }
 
-    function updateQty(n) {
-      if (!selected) return;
-      var maxQty = Math.max(1, Math.min(10, selected.stock));
-      qty = Math.max(1, Math.min(maxQty, n));
-      qtyNum.textContent = qty;
-      qtyDown.disabled = qty <= 1;
-      qtyUp.disabled   = qty >= maxQty;
-      var total = formatCents(qty * selected.price);
-      totalEl.textContent = total;
-      unitEl.textContent  = qty === 1 ? '' : formatCents(selected.price) + ' each';
-      payBtn.textContent  = 'Pay ' + total;
+    function recompute() {
+      var total = 0, anyQty = false;
+      Object.keys(cart).forEach(function(id) {
+        total += cart[id].qty * cart[id].price;
+        if (cart[id].qty > 0) anyQty = true;
+      });
+      totalEl.textContent = formatCents(total);
+      payBtn.disabled     = !anyQty;
+      payBtn.textContent  = anyQty ? 'Pay ' + formatCents(total) : 'Select items to pay';
     }
 
-    function selectItem(el) {
-      if (el.classList.contains('soldout')) return;
-      optionEls.forEach(function(o) { o.classList.remove('selected'); });
-      el.classList.add('selected');
-      selected = {
-        id:    el.getAttribute('data-id'),
-        price: parseInt(el.getAttribute('data-price'), 10),
-        stock: parseInt(el.getAttribute('data-stock'), 10),
-      };
-      payBtn.disabled = false;
-      updateQty(1);
-    }
-
-    optionEls.forEach(function(el) {
-      el.addEventListener('click', function() { selectItem(el); });
+    document.querySelectorAll('.qty-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var id     = btn.getAttribute('data-id');
+        var action = btn.getAttribute('data-action');
+        var row    = cart[id];
+        if (!row) return;
+        var next = row.qty + (action === 'up' ? 1 : -1);
+        row.qty = Math.max(0, Math.min(row.maxQty, next));
+        document.querySelector('[data-qty-for="' + id + '"]').textContent = row.qty;
+        recompute();
+      });
     });
 
-    var firstAvailable = optionEls.find(function(el) { return !el.classList.contains('soldout'); });
-    if (firstAvailable) {
-      selectItem(firstAvailable);
-    } else {
-      payBtn.disabled = true;
-      payBtn.textContent = 'Sold out';
-    }
-
-    qtyDown.addEventListener('click', function() { updateQty(qty - 1); });
-    qtyUp.addEventListener('click',   function() { updateQty(qty + 1); });
-
     payBtn.addEventListener('click', function() {
-      if (!selected) return;
-      payBtn.disabled    = true;
-      payBtn.textContent = 'Starting checkout…';
-      errMsg.textContent = '';
+      var cartItems = Object.keys(cart)
+        .filter(function(id) { return cart[id].qty > 0; })
+        .map(function(id) { return { item_id: id, quantity: cart[id].qty }; });
+      if (!cartItems.length) return;
+
+      payBtn.disabled     = true;
+      payBtn.textContent  = 'Starting checkout…';
+      errMsg.textContent  = '';
 
       fetch('/api/checkout', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ device_id: DEVICE_ID, item_id: selected.id, quantity: qty }),
+        body:    JSON.stringify({ device_id: DEVICE_ID, items: cartItems }),
       }).then(function(res) {
         return res.json().then(function(data) {
           if (!res.ok) throw new Error(data.error || 'Checkout failed');
@@ -231,10 +227,11 @@ router.get('/:device_id', async (req, res) => {
         });
       }).catch(function(e) {
         errMsg.textContent = e.message;
-        payBtn.disabled     = false;
-        updateQty(qty);
+        recompute();
       });
     });
+
+    recompute();
   </script>` : ''}
 </body>
 </html>`);

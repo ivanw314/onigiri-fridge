@@ -2,7 +2,7 @@
 const crypto = require('crypto');
 const { Router } = require('express');
 const { getOrder, updateOrder, isDuplicateEvent } = require('../orderStore');
-const { decrementStock, restoreStock } = require('../itemStore');
+const { decrementStockForItems, restoreStockForItems } = require('../itemStore');
 const { getSquareOrder, createRefund } = require('../square');
 const { publishUnlock } = require('../mqttClient');
 
@@ -79,15 +79,18 @@ router.post('/square', async (req, res) => {
     return;
   }
 
-  // 7. Decrement stock now that money has actually been captured. If stock ran
-  //    out between checkout creation and payment completion (race with another
-  //    buyer), bail out and refund instead of unlocking for an item we don't have.
-  const unitCents = order.unit_price_cents ?? parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
-  const amount_cents = (order.quantity || 1) * unitCents;
+  // 7. Decrement stock for every item in the cart now that money has actually
+  //    been captured. This is atomic across the whole order (see
+  //    decrementStockForItems) — if stock ran out for even one line item
+  //    between checkout creation and payment completion (race with another
+  //    buyer), none of it is taken, and we refund instead of unlocking for
+  //    items we don't have.
+  const amount_cents = order.items.reduce((sum, it) => sum + it.quantity * it.unit_price_cents, 0);
+  const stockLines = order.items.filter((it) => it.item_id).map((it) => ({ item_id: it.item_id, quantity: it.quantity }));
 
-  if (order.item_id) {
-    const updated = await decrementStock(order.item_id, order.quantity || 1);
-    if (!updated) {
+  if (stockLines.length > 0) {
+    const ok = await decrementStockForItems(stockLines);
+    if (!ok) {
       console.warn(`[WEBHOOK] Out of stock for order ${order_id} — refunding instead of unlocking`);
       await updateOrder(order_id, { status: 'refunded' });
       try {
@@ -114,7 +117,7 @@ router.post('/square', async (req, res) => {
   } catch (err) {
     console.error(`[WEBHOOK] Failed to publish unlock for ${order_id}:`, err.message);
     await updateOrder(order_id, { status: 'refunded' });
-    if (order.item_id) await restoreStock(order.item_id, order.quantity || 1);
+    if (stockLines.length > 0) await restoreStockForItems(stockLines);
     if (payment.id) {
       try {
         await createRefund({ payment_id: payment.id, order_id, amount_cents });

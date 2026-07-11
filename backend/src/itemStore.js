@@ -85,30 +85,60 @@ async function deleteItem(id) {
 // Used to decide delete vs. deactivate: an item referenced by order history
 // can't be hard-deleted without corrupting past orders' display/refunds.
 async function itemHasOrders(id) {
-  const { rows } = await pool.query('SELECT 1 FROM orders WHERE item_id = $1 LIMIT 1', [id]);
+  const { rows } = await pool.query('SELECT 1 FROM order_items WHERE item_id = $1 LIMIT 1', [id]);
   return rows.length > 0;
 }
 
-// Atomically decrements stock. Fails (returns null) if the item is inactive
-// or there isn't enough stock left — callers must treat null as "can't fulfill".
-async function decrementStock(id, qty) {
-  const { rows } = await pool.query(
-    `UPDATE items SET stock = stock - $2, updated_at = NOW()
-     WHERE id = $1 AND active = true AND stock >= $2
-     RETURNING *`,
-    [id, qty]
-  );
-  return rows[0] ?? null;
-}
-
 // Gives stock back when a paid order never actually dispensed (unlock
-// failure or timeout) — the item was never physically taken.
+// failure or timeout) — the item was never physically taken. Internal —
+// go through restoreStockForItems below.
 async function restoreStock(id, qty) {
   const { rows } = await pool.query(
     `UPDATE items SET stock = stock + $2, updated_at = NOW() WHERE id = $1 RETURNING *`,
     [id, qty]
   );
   return rows[0] ?? null;
+}
+
+// items: [{ item_id, quantity }, ...] — a cart can span several distinct
+// items, so stock for the whole order must be decremented as one atomic
+// transaction: either every line has enough stock, or none of it is taken.
+// Returns false (and leaves stock untouched) if any single line can't be
+// fulfilled — callers should treat that as "can't fulfill this order".
+async function decrementStockForItems(items) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const { item_id, quantity } of items) {
+      const { rows } = await client.query(
+        `UPDATE items SET stock = stock - $2, updated_at = NOW()
+         WHERE id = $1 AND active = true AND stock >= $2
+         RETURNING id`,
+        [item_id, quantity]
+      );
+      if (rows.length === 0) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+    }
+    await client.query('COMMIT');
+    return true;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// items: [{ item_id, quantity }, ...] — restoring is always additive/safe
+// per line, so unlike decrementStockForItems this doesn't need to be atomic
+// across the whole set.
+async function restoreStockForItems(items) {
+  for (const { item_id, quantity } of items) {
+    if (!item_id) continue;
+    await restoreStock(item_id, quantity);
+  }
 }
 
 module.exports = {
@@ -120,6 +150,6 @@ module.exports = {
   updateItem,
   deleteItem,
   itemHasOrders,
-  decrementStock,
-  restoreStock,
+  decrementStockForItems,
+  restoreStockForItems,
 };

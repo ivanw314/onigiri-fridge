@@ -4,7 +4,7 @@ require('dotenv').config();
 const express = require('express');
 const { connectMQTT, emitter } = require('./mqttClient');
 const { initDB, getOrder, updateOrder } = require('./orderStore');
-const { initItemsTable, restoreStock } = require('./itemStore');
+const { initItemsTable, restoreStockForItems } = require('./itemStore');
 const { createRefund } = require('./square');
 
 const app = express();
@@ -51,12 +51,13 @@ emitter.on('deviceEvent', async ({ device_id, event, order_id: eventOrderId }) =
         console.warn(`[EVT] Unlock timeout for order ${order_id} — refund needed`);
         await updateOrder(order_id, { status: 'timed_out' });
         clearPendingOrder(device_id);
-        if (order.item_id) await restoreStock(order.item_id, order.quantity || 1);
+        const stockLines = order.items.filter((it) => it.item_id).map((it) => ({ item_id: it.item_id, quantity: it.quantity }));
+        if (stockLines.length > 0) await restoreStockForItems(stockLines);
         const payment_id = order.square_payment_id;
         if (payment_id) {
           try {
-            const unitCents = order.unit_price_cents ?? parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
-            await createRefund({ payment_id, order_id, amount_cents: (order.quantity || 1) * unitCents });
+            const amount_cents = order.items.reduce((sum, it) => sum + it.quantity * it.unit_price_cents, 0);
+            await createRefund({ payment_id, order_id, amount_cents });
             console.log(`[REFUND] Square refund issued for order ${order_id}`);
           } catch (err) {
             console.error(`[REFUND] Square refund failed for order ${order_id}:`, err.message);

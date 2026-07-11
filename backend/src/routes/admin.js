@@ -420,16 +420,21 @@ router.get('/', (req, res) => {
         el.innerHTML = '<p style="color:#999;font-size:0.85rem">No orders yet.</p>';
         return;
       }
-      el.innerHTML = '<table><thead><tr><th>ID</th><th>Item</th><th>Status</th><th>Qty</th><th>When</th><th></th></tr></thead><tbody>' +
+      el.innerHTML = '<table><thead><tr><th>ID</th><th>Items</th><th>Status</th><th>Qty</th><th>When</th><th></th></tr></thead><tbody>' +
         orders.map(function(o) {
           var canRefund = o.status === 'complete' || o.status === 'dispensing';
           var action = (canRefund ? '<button class="refund-btn" data-id="' + o.id + '">Refund</button> ' : '') +
             '<button class="delete-btn" data-id="' + o.id + '">&#x2715;</button>';
+          var lineItems = o.items || [];
+          var itemsSummary = lineItems.length
+            ? lineItems.map(function(it) { return it.quantity + '&times; ' + escapeAttr(it.item_name); }).join(', ')
+            : '&#x2014;';
+          var totalQty = lineItems.reduce(function(sum, it) { return sum + it.quantity; }, 0);
           return '<tr>' +
             '<td>' + o.id.slice(0, 8) + '&hellip;</td>' +
-            '<td>' + (o.item_name || '&#x2014;') + '</td>' +
+            '<td>' + itemsSummary + '</td>' +
             '<td><span class="badge ' + o.status + '">' + o.status + '</span></td>' +
-            '<td>' + (o.quantity || 1) + '</td>' +
+            '<td>' + totalQty + '</td>' +
             '<td>' + timeAgo(o.created_at) + '</td>' +
             '<td>' + action + '</td>' +
             '</tr>';
@@ -732,8 +737,7 @@ router.post('/wifi-reset', requireAdmin, (req, res) => {
 
 router.get('/stats', requireAdmin, async (req, res) => {
   try {
-    const defaultUnitCents = parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
-    const stats = await getOrderStats(defaultUnitCents);
+    const stats = await getOrderStats();
     res.json(stats);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -875,8 +879,8 @@ router.post('/refund/:order_id', requireAdmin, async (req, res) => {
     if (order.status === 'refunded' || order.status === 'timed_out') {
       return res.status(400).json({ error: 'Already refunded' });
     }
-    const unitCents = order.unit_price_cents ?? parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
-    await createRefund({ payment_id: order.square_payment_id, order_id, amount_cents: (order.quantity || 1) * unitCents });
+    const amount_cents = order.items.reduce((sum, it) => sum + it.quantity * it.unit_price_cents, 0);
+    await createRefund({ payment_id: order.square_payment_id, order_id, amount_cents });
     await updateOrder(order_id, { status: 'refunded' });
     res.json({ ok: true });
   } catch (err) {

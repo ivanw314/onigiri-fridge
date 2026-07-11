@@ -30,13 +30,14 @@ async function squareFetch(path, options = {}) {
 }
 
 // ── createPaymentLink ─────────────────────────────────────────────────────────
-// Creates a Square hosted checkout URL.
-// order_id is stored as reference_id on the Square order so we can
+// Creates a Square hosted checkout URL covering one or more distinct items
+// (a cart). order_id is stored as reference_id on the Square order so we can
 // correlate the webhook back to our internal order.
 //
+// line_items: [{ name, quantity, amount_cents }, ...]
 // Returns: { checkout_url, square_order_id }
 
-async function createPaymentLink({ order_id, amount_cents, item_name, redirect_url, quantity = 1 }) {
+async function createPaymentLink({ order_id, line_items, redirect_url }) {
   const { SQUARE_LOCATION_ID } = process.env;
   if (!SQUARE_LOCATION_ID) throw new Error('SQUARE_LOCATION_ID env var not set');
 
@@ -47,16 +48,14 @@ async function createPaymentLink({ order_id, amount_cents, item_name, redirect_u
       order: {
         location_id:  SQUARE_LOCATION_ID,
         reference_id: order_id,
-        line_items: [
-          {
-            name:     item_name || 'Onigiri',
-            quantity: String(quantity),
-            base_price_money: {
-              amount:   amount_cents,
-              currency: 'USD',
-            },
+        line_items: line_items.map((li) => ({
+          name:     li.name,
+          quantity: String(li.quantity),
+          base_price_money: {
+            amount:   li.amount_cents,
+            currency: 'USD',
           },
-        ],
+        })),
       },
       checkout_options: {
         redirect_url,

@@ -8,8 +8,9 @@ router.get('/', async (req, res) => {
   const { order_id } = req.query;
   if (!order_id) return res.redirect('/');
 
-  const order    = await getOrder(order_id);
-  const itemName = order?.item_name || process.env.ITEM_NAME || 'item';
+  const order      = await getOrder(order_id);
+  const itemNames  = (order?.items || []).map((it) => it.item_name);
+  const itemLabel  = itemNames.length > 0 ? itemNames.join(', ') : (process.env.ITEM_NAME || 'items');
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(`<!DOCTYPE html>
@@ -64,7 +65,7 @@ router.get('/', async (req, res) => {
 
   <script>
     const ORDER_ID  = ${JSON.stringify(order_id)};
-    const ITEM_NAME = ${JSON.stringify(itemName)};
+    const ITEM_NAME = ${JSON.stringify(itemLabel)};
     const statusEl  = document.getElementById('status');
     let done = false;
     let currentStatus = 'pending';

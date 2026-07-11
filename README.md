@@ -1,12 +1,12 @@
 # Onigiri Fridge
 
-An ESP32-controlled, WiFi-connected mini fridge for unattended vending. Customers scan a QR code, pick an item and quantity, pay via Square, and the fridge unlocks itself over MQTT. A mobile-friendly admin panel handles remote control, WiFi provisioning, firmware updates, and the item catalog.
+An ESP32-controlled, WiFi-connected mini fridge for unattended vending. Customers scan a QR code, build a cart from the item catalog, pay via Square, and the fridge unlocks itself over MQTT. A mobile-friendly admin panel handles remote control, WiFi provisioning, firmware updates, and the item catalog.
 
 ## How It Works
 
 1. Customer scans a QR code linking to `/buy/:device_id`.
-2. The page lists every active catalog item with live stock; out-of-stock items are shown disabled. The customer picks one item + quantity and pays via a Square-hosted checkout link.
-3. Square's webhook (`POST /webhooks/square`) confirms payment, atomically decrements that item's stock, and publishes a signed `unlock` command over MQTT.
+2. The page lists every active catalog item with live stock; out-of-stock items are shown disabled. The customer sets a quantity on any number of different items — a single order can mix several distinct items — then pays via one Square-hosted checkout link for the whole cart.
+3. Square's webhook (`POST /webhooks/square`) confirms payment, atomically decrements stock for every item in the order (all-or-nothing), and publishes a signed `unlock` command over MQTT.
 4. The ESP32 verifies the command's HMAC signature and nonce, releases the lock relay, and reports `unlocked`.
 5. The customer opens the door, takes their item(s), and closes it — the fridge relocks automatically ~1.5s after the door is confirmed shut.
 6. If the door is never opened within 60s, the device reports `unlock_timeout`; the backend refunds the payment automatically and reverses the stock decrement.
@@ -97,8 +97,8 @@ Node.js/Express on Railway. HiveMQ Cloud (MQTT over TLS), Postgres, Square Payme
 |------|-----------------|
 | `src/index.js` | Express entry point; wires up routes; MQTT device-event handler (order state transitions, stock restore on timeout) |
 | `src/db.js` | Shared Postgres connection pool |
-| `src/orderStore.js` | Orders table CRUD, stats, Square-event dedup, SSE client registry |
-| `src/itemStore.js` | Items catalog CRUD, atomic stock decrement/restore |
+| `src/orderStore.js` | Orders + order_items (cart line items) CRUD, stats, Square-event dedup, SSE client registry |
+| `src/itemStore.js` | Items catalog CRUD, atomic multi-item stock decrement/restore |
 | `src/mqttClient.js` | HiveMQ connection, HMAC command signing/publishing, device heartbeat + activity-event tracking |
 | `src/square.js` | Square payment links, order lookup, refunds |
 | `src/routes/buy.js` | `GET /buy/:device_id` — multi-item storefront |
@@ -116,10 +116,10 @@ Node.js/Express on Railway. HiveMQ Cloud (MQTT over TLS), Postgres, Square Payme
 
 The product catalog lives in Postgres (`items` table: `name`, `price_cents`, `stock`, `active`), managed from the admin panel's **Items** card — add, edit, deactivate/restore, or delete items. On an empty database the catalog auto-seeds one row from the `ITEM_NAME` / `ITEM_PRICE_CENTS` env vars, so existing deployments keep working with no manual step.
 
-- The `/buy` page lists every active item with live stock; out-of-stock items are shown disabled rather than hidden, and the quantity stepper is capped at remaining stock.
-- Stock decrements atomically the moment Square confirms payment (not at checkout-link creation), so two concurrent buyers can't oversell the last unit. If the decrement fails (a stock race, or an unlock command fails to send) the order is refunded automatically instead of unlocking.
-- Stock is restored automatically only when a paid order never dispenses (unlock-publish failure, or the device's `unlock_timeout` event) — never for manual refunds of already-dispensed orders, since the item may already be physically gone.
-- Every order snapshots the item's name/price at purchase time, so later catalog edits or deletions never change historical order display, revenue stats, or refund amounts.
+- The `/buy` page lists every active item with live stock and its own quantity stepper — a customer can add several distinct items to one cart — and out-of-stock items are shown disabled rather than hidden, with each stepper capped at remaining stock.
+- An order can hold multiple line items (`order_items` table, one row per distinct item). Stock decrements atomically across the whole cart the moment Square confirms payment (not at checkout-link creation): either every line has enough stock or none of it is taken, so two concurrent buyers can't oversell the last unit. If the decrement fails (a stock race, or an unlock command fails to send) the order is refunded automatically instead of unlocking.
+- Stock is restored automatically for every line item only when a paid order never dispenses (unlock-publish failure, or the device's `unlock_timeout` event) — never for manual refunds of already-dispensed orders, since the items may already be physically gone.
+- Every order snapshots each line item's name/price at purchase time, so later catalog edits or deletions never change historical order display, revenue stats, or refund amounts.
 - Deleting an item hard-deletes it if it has no order history, otherwise deactivates it (hidden from the storefront, restorable later) to keep past orders intact.
 
 ### Admin panel (`/admin`)

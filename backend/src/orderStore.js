@@ -16,23 +16,27 @@ async function initDB() {
       square_order_id   TEXT,
       square_payment_id TEXT,
       event_id          TEXT UNIQUE,
-      quantity          INT NOT NULL DEFAULT 1,
       created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
   await pool.query(`
-    ALTER TABLE orders ADD COLUMN IF NOT EXISTS quantity INT NOT NULL DEFAULT 1
+    CREATE TABLE IF NOT EXISTS order_items (
+      id                SERIAL PRIMARY KEY,
+      order_id          UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      item_id           UUID,
+      item_name         TEXT NOT NULL,
+      unit_price_cents  INT NOT NULL,
+      quantity          INT NOT NULL
+    )
   `);
-  await pool.query(`
-    ALTER TABLE orders ADD COLUMN IF NOT EXISTS item_id UUID
-  `);
-  await pool.query(`
-    ALTER TABLE orders ADD COLUMN IF NOT EXISTS item_name TEXT
-  `);
-  await pool.query(`
-    ALTER TABLE orders ADD COLUMN IF NOT EXISTS unit_price_cents INT
-  `);
+  // A single order can now hold multiple distinct items (order_items), so the
+  // old single-item columns on orders are redundant. Pre-launch cleanup, no
+  // backfill — any pre-existing test orders just show no line items.
+  await pool.query(`ALTER TABLE orders DROP COLUMN IF EXISTS item_id`);
+  await pool.query(`ALTER TABLE orders DROP COLUMN IF EXISTS item_name`);
+  await pool.query(`ALTER TABLE orders DROP COLUMN IF EXISTS unit_price_cents`);
+  await pool.query(`ALTER TABLE orders DROP COLUMN IF EXISTS quantity`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS seen_events (
       event_id   TEXT PRIMARY KEY,
@@ -56,25 +60,45 @@ async function getActiveOrderForDevice(device_id) {
   return rows[0] ?? null;
 }
 
-async function createOrder({ device_id, quantity = 1, item_id = null, item_name = null, unit_price_cents = null }) {
+async function createOrder({ device_id }) {
   const id = uuidv4();
   const { rows } = await pool.query(
-    `INSERT INTO orders (id, device_id, status, quantity, item_id, item_name, unit_price_cents, created_at, updated_at)
-     VALUES ($1, $2, 'pending', $3, $4, $5, $6, NOW(), NOW())
+    `INSERT INTO orders (id, device_id, status, created_at, updated_at)
+     VALUES ($1, $2, 'pending', NOW(), NOW())
      RETURNING *`,
-    [id, device_id, quantity, item_id, item_name, unit_price_cents]
+    [id, device_id]
   );
   const order = rows[0];
   console.log(`[ORDER] Created ${order.id} for device ${device_id}`);
   return order;
 }
 
+// items: [{ item_id, item_name, unit_price_cents, quantity }, ...]
+// One row per distinct item in the cart — lets a single order hold several
+// different items instead of just one.
+async function addOrderItems(order_id, items) {
+  const values = [];
+  const placeholders = items.map((it, i) => {
+    const base = i * 5;
+    values.push(order_id, it.item_id, it.item_name, it.unit_price_cents, it.quantity);
+    return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
+  }).join(', ');
+  await pool.query(
+    `INSERT INTO order_items (order_id, item_id, item_name, unit_price_cents, quantity)
+     VALUES ${placeholders}`,
+    values
+  );
+}
+
 async function getOrder(order_id) {
-  const { rows } = await pool.query(
-    'SELECT * FROM orders WHERE id = $1',
+  const { rows } = await pool.query('SELECT * FROM orders WHERE id = $1', [order_id]);
+  const order = rows[0];
+  if (!order) return null;
+  const { rows: items } = await pool.query(
+    'SELECT item_id, item_name, unit_price_cents, quantity FROM order_items WHERE order_id = $1 ORDER BY id ASC',
     [order_id]
   );
-  return rows[0] ?? null;
+  return { ...order, items };
 }
 
 async function updateOrder(order_id, updates) {
@@ -97,11 +121,22 @@ async function updateOrder(order_id, updates) {
 }
 
 async function getRecentOrders(limit = 20) {
-  const { rows } = await pool.query(
+  const { rows: orders } = await pool.query(
     'SELECT * FROM orders ORDER BY created_at DESC LIMIT $1',
     [limit]
   );
-  return rows;
+  if (orders.length === 0) return [];
+
+  const { rows: items } = await pool.query(
+    'SELECT * FROM order_items WHERE order_id = ANY($1::uuid[]) ORDER BY id ASC',
+    [orders.map((o) => o.id)]
+  );
+  const itemsByOrder = new Map();
+  for (const it of items) {
+    if (!itemsByOrder.has(it.order_id)) itemsByOrder.set(it.order_id, []);
+    itemsByOrder.get(it.order_id).push(it);
+  }
+  return orders.map((o) => ({ ...o, items: itemsByOrder.get(o.id) || [] }));
 }
 
 async function deleteOrder(order_id) {
@@ -114,22 +149,21 @@ async function deleteAllOrders() {
   return rowCount;
 }
 
-// defaultUnitCents is only used for legacy orders predating per-order price
-// snapshots (unit_price_cents IS NULL) — new orders always carry their own.
-async function getOrderStats(defaultUnitCents) {
+async function getOrderStats() {
   const [{ rows: todayRows }, { rows: totalRows }] = await Promise.all([
     pool.query(
-      `SELECT COALESCE(SUM(quantity), 0) AS count,
-              COALESCE(SUM(quantity * COALESCE(unit_price_cents, $1)), 0) AS revenue_cents
-       FROM orders
-       WHERE status = 'complete' AND created_at >= CURRENT_DATE`,
-      [defaultUnitCents]
+      `SELECT COALESCE(SUM(oi.quantity), 0) AS count,
+              COALESCE(SUM(oi.quantity * oi.unit_price_cents), 0) AS revenue_cents
+       FROM orders o
+       JOIN order_items oi ON oi.order_id = o.id
+       WHERE o.status = 'complete' AND o.created_at >= CURRENT_DATE`
     ),
     pool.query(
-      `SELECT COALESCE(SUM(quantity), 0) AS count,
-              COALESCE(SUM(quantity * COALESCE(unit_price_cents, $1)), 0) AS revenue_cents
-       FROM orders WHERE status = 'complete'`,
-      [defaultUnitCents]
+      `SELECT COALESCE(SUM(oi.quantity), 0) AS count,
+              COALESCE(SUM(oi.quantity * oi.unit_price_cents), 0) AS revenue_cents
+       FROM orders o
+       JOIN order_items oi ON oi.order_id = o.id
+       WHERE o.status = 'complete'`
     ),
   ]);
   return {
@@ -175,6 +209,7 @@ function _notifySSEClients(order_id, status) {
 module.exports = {
   initDB,
   createOrder,
+  addOrderItems,
   getActiveOrderForDevice,
   getOrder,
   updateOrder,
