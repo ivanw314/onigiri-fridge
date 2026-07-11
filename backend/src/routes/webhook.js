@@ -8,6 +8,8 @@ const { publishUnlock } = require('../mqttClient');
 
 const router = Router();
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // POST /webhooks/square
 // Square calls this after every payment state change.
 // We only act on payment.updated with status=COMPLETED.
@@ -15,6 +17,18 @@ router.post('/square', async (req, res) => {
   // 1. Acknowledge Square immediately (Square retries if it doesn't get 200 fast)
   res.sendStatus(200);
 
+  try {
+    await handleSquareWebhook(req);
+  } catch (err) {
+    // This webhook fires for every payment on the Square account/location,
+    // not just ones from our checkout flow (POS sales, Square's "send test
+    // webhook" feature, etc.) — anything unexpected here must be logged and
+    // dropped, never thrown, or one bad event takes the whole server down.
+    console.error('[WEBHOOK] Unhandled error processing event:', err.message);
+  }
+});
+
+async function handleSquareWebhook(req) {
   // 2. Verify the HMAC signature — must happen before any business logic
   if (!verifySquareSignature(req)) {
     console.warn('[WEBHOOK] Signature verification failed — ignoring');
@@ -64,6 +78,16 @@ router.post('/square', async (req, res) => {
 
   if (!order_id) {
     console.warn('[WEBHOOK] Could not resolve reference_id — dropping event');
+    return;
+  }
+
+  // reference_id can come from an unrelated payment on the same Square
+  // account/location (POS sale, test webhook, etc.) — anything that isn't
+  // one of our own order UUIDs was never going to match a row anyway, and
+  // the DB driver throws on malformed UUID input rather than just returning
+  // no rows, so check the shape first.
+  if (!UUID_RE.test(order_id)) {
+    console.warn(`[WEBHOOK] reference_id "${order_id}" isn't one of our orders — dropping event`);
     return;
   }
 
@@ -129,7 +153,7 @@ router.post('/square', async (req, res) => {
       console.warn(`[REFUND] No payment_id for order ${order_id} — skipping Square refund`);
     }
   }
-});
+}
 
 // ── Square HMAC verification ──────────────────────────────────────────────────
 // Square computes: Base64( HMAC-SHA256( signatureKey, notificationUrl + rawBody ) )
