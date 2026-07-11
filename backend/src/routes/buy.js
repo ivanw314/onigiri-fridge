@@ -6,6 +6,7 @@ const { getActiveItems } = require('../itemStore');
 const router = Router();
 
 const STORE_NAME = () => process.env.STORE_NAME || process.env.ITEM_NAME || 'Onigiri Fridge';
+const STORE_LOGO_URL = () => process.env.STORE_LOGO_URL || null;
 
 function escapeHtml(s) {
   return String(s)
@@ -89,6 +90,7 @@ router.get('/:device_id', async (req, res) => {
       box-shadow: 0 4px 24px rgba(0,0,0,0.07);
     }
     .emoji  { font-size: 3rem; line-height: 1; margin-bottom: 0.75rem; }
+    .logo   { max-width: 100%; max-height: 6rem; margin-bottom: 0.75rem; }
     h1      { font-size: 1.4rem; font-weight: 700; margin-bottom: 0.25rem; }
     .item-list { display: flex; flex-direction: column; gap: 0.5rem; margin: 1.25rem 0; text-align: left; }
     .item-row {
@@ -155,7 +157,9 @@ router.get('/:device_id', async (req, res) => {
 </head>
 <body>
   <div class="card">
-    <div class="emoji">🍙</div>
+    ${STORE_LOGO_URL()
+      ? `<img class="logo" src="${escapeHtml(STORE_LOGO_URL())}" alt="${escapeHtml(STORE_NAME())}">`
+      : `<div class="emoji">🍙</div>`}
     <h1>${escapeHtml(STORE_NAME())}</h1>
     ${bodyHtml}
   </div>
