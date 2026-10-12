@@ -9,10 +9,12 @@ const emitter = new EventEmitter();
 // Last heartbeat timestamp per device_id → Date
 const deviceHeartbeats = new Map();
 
-// Tracks which order_id is currently being fulfilled per device_id.
-// Used to correlate device events back to orders until firmware includes
-// order_id in event payloads (Phase 3 firmware update).
-const pendingOrders = new Map(); // device_id → order_id
+// Devices whose most recent unlock came from the admin panel rather than a
+// customer purchase. Door events during an admin unlock (restocking, etc.)
+// aren't attributed to any order — otherwise opening the fridge shortly
+// after a sale could complete that sale based on the admin's door activity.
+// Cleared by the next customer unlock.
+const adminUnlocks = new Set(); // device_id
 
 const MAX_EVENTS      = 50;
 const recentEvents    = []; // newest-first ring buffer
@@ -194,6 +196,18 @@ function publishOTA(device_id, url) {
 }
 
 function publishUnlock(device_id, order_id) {
+  _publishUnlockCmd(device_id, order_id);
+  adminUnlocks.delete(device_id);
+}
+
+// Admin-panel unlock — not tied to any customer order. The firmware still
+// expects an order_id in the signed command, so send a placeholder.
+function publishAdminUnlock(device_id) {
+  _publishUnlockCmd(device_id, `admin-${Date.now()}`);
+  adminUnlocks.add(device_id);
+}
+
+function _publishUnlockCmd(device_id, order_id) {
   if (!client?.connected) {
     throw new Error('MQTT client not connected');
   }
@@ -215,7 +229,6 @@ function publishUnlock(device_id, order_id) {
     { qos: 1 }
   );
 
-  pendingOrders.set(device_id, order_id);
   console.log(`[MQTT] Published unlock → ${device_id} / order ${order_id}`);
 }
 
@@ -305,17 +318,14 @@ function isDeviceOnline(device_id, maxAgeMs = 90_000) {
   return Date.now() - last.getTime() < maxAgeMs;
 }
 
-function getPendingOrder(device_id) {
-  return pendingOrders.get(device_id) || null;
-}
-
-function clearPendingOrder(device_id) {
-  pendingOrders.delete(device_id);
+function isAdminUnlockActive(device_id) {
+  return adminUnlocks.has(device_id);
 }
 
 module.exports = {
   connectMQTT,
   publishUnlock,
+  publishAdminUnlock,
   publishLock,
   publishOTA,
   publishReboot,
@@ -325,7 +335,6 @@ module.exports = {
   getDeviceLastSeen,
   getDeviceWifiInfo,
   getRecentEvents,
-  getPendingOrder,
-  clearPendingOrder,
+  isAdminUnlockActive,
   emitter,
 };

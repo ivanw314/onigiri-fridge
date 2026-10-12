@@ -1,7 +1,7 @@
 'use strict';
 const { Router } = require('express');
 const {
-  publishOTA, publishLock, publishUnlock, publishReboot, publishWifiUpdate, publishWifiReset,
+  publishOTA, publishLock, publishAdminUnlock, publishReboot, publishWifiUpdate, publishWifiReset,
   isDeviceOnline, getDeviceLastSeen, getDeviceWifiInfo, getRecentEvents,
 } = require('../mqttClient');
 const { getRecentOrders, getOrderStats, getOrder, updateOrder, deleteOrder, deleteAllOrders } = require('../orderStore');
@@ -844,7 +844,7 @@ router.post('/unlock', requireAdmin, (req, res) => {
   const device_id = DEVICE_ID();
   if (!isDeviceOnline(device_id)) return res.status(503).json({ error: 'Device is offline' });
   try {
-    publishUnlock(device_id, `admin-${Date.now()}`);
+    publishAdminUnlock(device_id);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

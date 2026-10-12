@@ -1,6 +1,6 @@
 'use strict';
 const { v4: uuidv4 } = require('uuid');
-const { pool } = require('./db');
+const { pool, isUuid } = require('./db');
 
 // SSE response objects — ephemeral by nature, stays in-memory
 const sseClients = new Map(); // order_id → Set<res>
@@ -42,6 +42,10 @@ async function initDB() {
   // order_items, since that sum is pre-tax and would short-refund the
   // customer once sales tax is added at checkout.
   await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS total_cents INT`);
+  // When the door was first seen opening during this order's unlock. An
+  // order is only ever marked complete once this is set, so a lost message
+  // can never complete a sale the customer may not have been able to open.
+  await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS door_opened_at TIMESTAMPTZ`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS seen_events (
       event_id   TEXT PRIMARY KEY,
@@ -110,6 +114,73 @@ async function expireStalePendingOrders() {
   return rows.length;
 }
 
+// How far back to look when matching a device event to an order: long
+// enough to cover paying plus a slow customer with the door open, short
+// enough never to reach back to an earlier, unrelated sale.
+const IN_PROGRESS_ORDER_WINDOW_MINUTES = 15;
+
+// The order a device event (unlocked, door_open, ...) belongs to. Firmware
+// events don't carry an order_id, so it's the device's most recent
+// paid/dispensing order — looked up in the database rather than kept in
+// memory, so a server restart mid-sale doesn't lose track of the order.
+async function getInProgressOrderForDevice(device_id) {
+  const { rows } = await pool.query(
+    `SELECT id FROM orders
+     WHERE device_id = $1
+       AND status IN ('paid', 'dispensing')
+       AND created_at > NOW() - INTERVAL '${IN_PROGRESS_ORDER_WINDOW_MINUTES} minutes'
+     ORDER BY created_at DESC LIMIT 1`,
+    [device_id]
+  );
+  return rows[0] ?? null;
+}
+
+// Records that the door was opened during this order's unlock. Keeps the
+// first open if the door is opened more than once.
+async function markDoorOpened(order_id) {
+  await pool.query(
+    `UPDATE orders SET door_opened_at = COALESCE(door_opened_at, NOW())
+     WHERE id = $1 AND status IN ('paid', 'dispensing')`,
+    [order_id]
+  );
+}
+
+// Completes a dispensing order, but only if the door was seen opening. A
+// single conditional UPDATE so overlapping triggers (door_closed, locked
+// 1.5s later, the sweep below) can't race each other.
+async function completeOrderIfDoorOpened(order_id) {
+  const { rows } = await pool.query(
+    `UPDATE orders SET status = 'complete', updated_at = NOW()
+     WHERE id = $1 AND status = 'dispensing' AND door_opened_at IS NOT NULL
+     RETURNING id`,
+    [order_id]
+  );
+  if (rows.length === 0) return false;
+  console.log(`[ORDER] ${order_id} → complete`);
+  _notifySSEClients(order_id, 'complete');
+  return true;
+}
+
+// Safety net for when neither door_closed nor locked made it through (the
+// fridge dropped off WiFi, or the server was down at that moment). Only
+// completes orders where the door was seen opening; anything without that
+// evidence stays 'dispensing' for the admin to resolve rather than guessing.
+const DISPENSE_SWEEP_MINUTES = 5;
+
+async function completeStaleDispensingOrders() {
+  const { rows } = await pool.query(
+    `UPDATE orders SET status = 'complete', updated_at = NOW()
+     WHERE status = 'dispensing'
+       AND door_opened_at <= NOW() - INTERVAL '${DISPENSE_SWEEP_MINUTES} minutes'
+     RETURNING id`
+  );
+  for (const { id } of rows) {
+    console.log(`[ORDER] ${id} → complete (door was opened; close never received)`);
+    _notifySSEClients(id, 'complete');
+  }
+  return rows.length;
+}
+
 async function createOrder({ device_id }) {
   const id = uuidv4();
   const { rows } = await pool.query(
@@ -141,6 +212,9 @@ async function addOrderItems(order_id, items) {
 }
 
 async function getOrder(order_id) {
+  // order_id often comes straight from a URL — treat anything malformed as
+  // "no such order" here rather than in every caller.
+  if (!isUuid(order_id)) return null;
   const { rows } = await pool.query('SELECT * FROM orders WHERE id = $1', [order_id]);
   const order = rows[0];
   if (!order) return null;
@@ -263,6 +337,10 @@ module.exports = {
   getActiveOrderForDevice,
   cancelPendingOrderForDevice,
   expireStalePendingOrders,
+  getInProgressOrderForDevice,
+  markDoorOpened,
+  completeOrderIfDoorOpened,
+  completeStaleDispensingOrders,
   getOrder,
   updateOrder,
   getRecentOrders,

@@ -1,6 +1,6 @@
 'use strict';
 const { v4: uuidv4 } = require('uuid');
-const { pool } = require('./db');
+const { pool, isUuid } = require('./db');
 
 // ── Schema init ───────────────────────────────────────────────────────────────
 
@@ -47,6 +47,8 @@ async function getAllItems() {
 }
 
 async function getItem(id) {
+  // id comes straight from the public checkout request body.
+  if (!isUuid(id)) return null;
   const { rows } = await pool.query('SELECT * FROM items WHERE id = $1', [id]);
   return rows[0] ?? null;
 }

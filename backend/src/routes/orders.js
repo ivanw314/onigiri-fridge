@@ -9,7 +9,13 @@ const router = Router();
 // { status } events until the order reaches a terminal state.
 router.get('/:order_id/status', async (req, res) => {
   const { order_id } = req.params;
-  const order = await getOrder(order_id);
+  let order;
+  try {
+    order = await getOrder(order_id);
+  } catch (err) {
+    console.error('[ORDERS] Failed to load order:', err.message);
+    return res.status(500).json({ error: 'Could not load order' });
+  }
 
   if (!order) {
     return res.status(404).json({ error: 'Order not found' });
@@ -42,9 +48,14 @@ router.get('/:order_id/status', async (req, res) => {
 // GET /api/orders/:order_id/status/poll
 // One-shot fallback used by the thank-you page when the SSE stream dies.
 router.get('/:order_id/status/poll', async (req, res) => {
-  const order = await getOrder(req.params.order_id);
-  if (!order) return res.status(404).json({ error: 'Order not found' });
-  res.json({ status: order.status });
+  try {
+    const order = await getOrder(req.params.order_id);
+    if (!order) return res.status(404).json({ error: 'Order not found' });
+    res.json({ status: order.status });
+  } catch (err) {
+    console.error('[ORDERS] Failed to load order:', err.message);
+    res.status(500).json({ error: 'Could not load order' });
+  }
 });
 
 module.exports = router;

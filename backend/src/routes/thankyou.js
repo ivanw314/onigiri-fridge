@@ -1,14 +1,24 @@
 'use strict';
 const { Router } = require('express');
 const { getOrder } = require('../orderStore');
+const { isUuid } = require('../db');
 
 const router = Router();
 
 router.get('/', async (req, res) => {
   const { order_id } = req.query;
-  if (!order_id) return res.redirect('/');
+  // Anything that isn't an order ID can't match an order, and order_id is
+  // echoed into the page's <script> below, so reject it up front.
+  if (!isUuid(order_id)) return res.redirect('/');
 
-  const order      = await getOrder(order_id);
+  let order = null;
+  try {
+    order = await getOrder(order_id);
+  } catch (err) {
+    // Still render the page — it polls for live status on its own.
+    console.error('[THANKYOU] Failed to load order:', err.message);
+  }
+
   const itemNames  = (order?.items || []).map((it) => it.item_name);
   const itemLabel  = itemNames.length > 0 ? itemNames.join(', ') : (process.env.ITEM_NAME || 'items');
 

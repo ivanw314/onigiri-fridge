@@ -2,8 +2,11 @@
 require('dotenv').config();
 
 const express = require('express');
-const { connectMQTT, emitter } = require('./mqttClient');
-const { initDB, getOrder, updateOrder, expireStalePendingOrders } = require('./orderStore');
+const { connectMQTT, emitter, isAdminUnlockActive } = require('./mqttClient');
+const {
+  initDB, getOrder, updateOrder, expireStalePendingOrders,
+  getInProgressOrderForDevice, markDoorOpened, completeOrderIfDoorOpened, completeStaleDispensingOrders,
+} = require('./orderStore');
 const { initItemsTable, restoreStockForItems } = require('./itemStore');
 const { createRefund } = require('./square');
 
@@ -29,8 +32,11 @@ app.get('/health', (_req, res) => res.json({ ok: true, ts: Date.now() }));
 // The MQTT client emits 'deviceEvent' whenever the ESP32 publishes to .../evt.
 emitter.on('deviceEvent', async ({ device_id, event, order_id: eventOrderId }) => {
   try {
-    const { getPendingOrder, clearPendingOrder } = require('./mqttClient');
-    const order_id = eventOrderId || getPendingOrder(device_id);
+    // Events during an admin-panel unlock belong to no order.
+    let order_id = eventOrderId;
+    if (!order_id && !isAdminUnlockActive(device_id)) {
+      order_id = (await getInProgressOrderForDevice(device_id))?.id;
+    }
     if (!order_id) return;
 
     const order = await getOrder(order_id);
@@ -40,17 +46,26 @@ emitter.on('deviceEvent', async ({ device_id, event, order_id: eventOrderId }) =
       case 'unlocked':
         await updateOrder(order_id, { status: 'dispensing' });
         break;
-      case 'relocked':
+      case 'door_open':
+        console.log(`[EVT] ${device_id} / ${order_id}: ${event}`);
+        await markDoorOpened(order_id);
+        break;
       case 'door_closed':
-        if (order.status === 'dispensing') {
-          await updateOrder(order_id, { status: 'complete' });
-          clearPendingOrder(device_id);
-        }
+        // A close while unlocked means the door was opened, even if the
+        // door_open message itself never arrived.
+        await markDoorOpened(order_id);
+        await completeOrderIfDoorOpened(order_id);
+        break;
+      case 'locked':
+      case 'relocked':
+        // Backup for a lost door_closed. The fridge also relocks after an
+        // unlock timeout or a forced lock, so this only completes the order
+        // if the door was actually opened.
+        await completeOrderIfDoorOpened(order_id);
         break;
       case 'unlock_timeout': {
         console.warn(`[EVT] Unlock timeout for order ${order_id} — refund needed`);
         await updateOrder(order_id, { status: 'timed_out' });
-        clearPendingOrder(device_id);
         const stockLines = order.items.filter((it) => it.item_id).map((it) => ({ item_id: it.item_id, quantity: it.quantity }));
         if (stockLines.length > 0) await restoreStockForItems(stockLines);
         const payment_id = order.square_payment_id;
@@ -79,6 +94,14 @@ emitter.on('deviceEvent', async ({ device_id, event, order_id: eventOrderId }) =
   }
 });
 
+// Last-resort guard: Express 4 doesn't catch errors thrown from async route
+// handlers, and Node exits on an unhandled rejection by default. One bad
+// request used to take the whole server down mid-sale; log it and keep
+// serving instead.
+process.on('unhandledRejection', (err) => {
+  console.error('[SERVER] Unhandled rejection:', err);
+});
+
 // ── Start ─────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 
@@ -88,10 +111,14 @@ async function start() {
   await connectMQTT();
 
   // Sweep abandoned pending orders (checkout started, never paid) over to
-  // 'timed_out' so they don't sit as 'pending' forever in the dashboard.
+  // 'timed_out' so they don't sit as 'pending' forever in the dashboard, and
+  // complete dispensing orders whose door-close message was lost.
   setInterval(() => {
     expireStalePendingOrders().catch((err) => {
       console.error('[ORDER] Failed to expire stale pending orders:', err.message);
+    });
+    completeStaleDispensingOrders().catch((err) => {
+      console.error('[ORDER] Failed to complete stale dispensing orders:', err.message);
     });
   }, 30 * 1000);
 
