@@ -98,7 +98,7 @@ Node.js/Express on Railway. HiveMQ Cloud (MQTT over TLS), Postgres, Square Payme
 | `src/index.js` | Express entry point; wires up routes; MQTT device-event handler (order state transitions, stock restore on timeout) |
 | `src/db.js` | Shared Postgres connection pool |
 | `src/orderStore.js` | Orders + order_items (cart line items) CRUD, stats, Square-event dedup, SSE client registry |
-| `src/itemStore.js` | Items catalog CRUD, atomic multi-item stock decrement/restore |
+| `src/itemStore.js` | Items catalog + categories CRUD, atomic multi-item stock decrement/restore |
 | `src/mqttClient.js` | HiveMQ connection, HMAC command signing/publishing, device heartbeat + activity-event tracking |
 | `src/square.js` | Square payment links, order lookup, refunds |
 | `src/routes/buy.js` | `GET /buy/:device_id` — multi-item storefront |
@@ -121,6 +121,7 @@ The product catalog lives in Postgres (`items` table: `name`, `price_cents`, `st
 - Stock is restored automatically for every line item only when a paid order never dispenses (unlock-publish failure, or the device's `unlock_timeout` event) — never for manual refunds of already-dispensed orders, since the items may already be physically gone.
 - Every order snapshots each line item's name/price at purchase time, so later catalog edits or deletions never change historical order display, revenue stats, or refund amounts.
 - Deleting an item hard-deletes it if it has no order history, otherwise deactivates it (hidden from the storefront, restorable later) to keep past orders intact.
+- Items can optionally belong to a category (`categories` table: `name`, `position`), managed from the admin panel's **Categories** card. The `/buy` page shows one headed section per category in the admin's chosen order, uncategorized items last under "Other", and a sticky row of chips that jump to each section. Categories with no active items are hidden; with no categories at all the page is one plain list. Deleting a category leaves its items on sale, just uncategorized. The cart total and Pay button stay pinned to the bottom of the screen however long the menu is.
 
 ### Admin panel (`/admin`)
 
@@ -129,7 +130,8 @@ Installable PWA, Bearer-token auth (`ADMIN_SECRET`), persistent login via localS
 - **Status** — online/offline, last-seen, WiFi SSID/signal/firmware version, manual refresh
 - **Sales** — today's / all-time items sold and revenue (computed from each order's snapshotted price)
 - **Controls** — Unlock, Lock, Reboot
-- **Items** — catalog CRUD, stock editing, add/delete
+- **Categories** — add, rename, reorder (↑/↓), delete the buy page's sections
+- **Items** — catalog CRUD grouped by category, stock editing, category picker, add/delete
 - **WiFi Settings** — remote credential update, factory reset (double-confirm)
 - **Firmware Update** — OTA trigger by URL
 - **Recent Orders** — item, status, quantity, timestamp; refund / delete per row, clear all

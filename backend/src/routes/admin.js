@@ -7,6 +7,7 @@ const {
 const { getRecentOrders, getOrderStats, getOrder, updateOrder, deleteOrder, deleteAllOrders } = require('../orderStore');
 const {
   getAllItems, getItem, createItem, updateItem, deleteItem, itemHasOrders,
+  getCategories, getCategory, createCategory, renameCategory, moveCategory, deleteCategory,
 } = require('../itemStore');
 const { createRefund } = require('../square');
 const { US_TIMEZONES, getSettings, setSetting } = require('../settingsStore');
@@ -158,17 +159,29 @@ router.get('/', (req, res) => {
     .item-badge.oos { color: #c00; }
     .item-fields { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
     .item-fields input { flex: 1 1 70px; min-width: 60px; margin-bottom: 0; padding: 0.5rem; font-size: 0.85rem; }
-    .item-save-btn, .item-del-btn, .item-restore-btn, .item-purge-btn {
+    .item-card select { margin-bottom: 0.5rem; padding: 0.5rem; font-size: 0.85rem; }
+    .item-group + .item-group { margin-top: 1.5rem; }
+    .item-group-heading {
+      font-size: 0.72rem; font-weight: 700; color: #999; margin-bottom: 0.6rem;
+      text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .item-group-heading + .item-card { border-top: none; padding-top: 0; }
+    .item-save-btn, .item-del-btn, .item-restore-btn, .item-purge-btn,
+    .cat-save-btn, .cat-del-btn, .cat-move-btn {
       width: auto; padding: 0.5rem 0.6rem; font-size: 0.78rem; border-radius: 8px;
       font-weight: 500; cursor: pointer; font-family: inherit;
     }
-    .item-save-btn { background: #fff; color: #111; border: 1px solid #e0e0e0; }
-    .item-save-btn:hover:not(:disabled) { background: #f5f5f5; }
-    .item-del-btn, .item-purge-btn { background: #fff; color: #c00; border: 1px solid #f5c0c0; }
-    .item-del-btn:hover:not(:disabled), .item-purge-btn:hover:not(:disabled) { background: #fef0f0; }
+    .item-save-btn, .cat-save-btn, .cat-move-btn { background: #fff; color: #111; border: 1px solid #e0e0e0; }
+    .item-save-btn:hover:not(:disabled), .cat-save-btn:hover:not(:disabled), .cat-move-btn:hover:not(:disabled) { background: #f5f5f5; }
+    .cat-move-btn:disabled { background: #fff; color: #ccc; }
+    .item-del-btn, .item-purge-btn, .cat-del-btn { background: #fff; color: #c00; border: 1px solid #f5c0c0; }
+    .item-del-btn:hover:not(:disabled), .item-purge-btn:hover:not(:disabled), .cat-del-btn:hover:not(:disabled) { background: #fef0f0; }
     .item-restore-btn { background: #fff; color: #1a7a1a; border: 1px solid #bfe3bf; }
     .item-restore-btn:hover:not(:disabled) { background: #eef8ee; }
     .add-item-form { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #f0f0f0; }
+    .cat-row { display: flex; gap: 0.4rem; align-items: center; padding: 0.5rem 0; border-top: 1px solid #f0f0f0; }
+    .cat-row:first-child { border-top: none; padding-top: 0; }
+    .cat-row input { flex: 1 1 auto; min-width: 0; margin-bottom: 0; padding: 0.5rem; font-size: 0.85rem; }
   </style>
 </head>
 <body>
@@ -236,12 +249,24 @@ router.get('/', (req, res) => {
     </div>
 
     <div class="card">
+      <h2>Categories</h2>
+      <p class="status-sub" style="margin:-0.5rem 0 1rem">Sections on the buy page, shown in this order. Items without a category go last, under &ldquo;Other&rdquo;.</p>
+      <div id="categoriesList"><p style="color:#999;font-size:0.85rem">Loading&#x2026;</p></div>
+      <div class="add-item-form">
+        <input type="text" id="newCategoryName" placeholder="Category name, e.g. Drinks">
+        <button id="addCategoryBtn">Add category</button>
+        <p class="msg" id="addCategoryMsg"></p>
+      </div>
+    </div>
+
+    <div class="card">
       <h2>Items</h2>
       <div id="itemsList"><p style="color:#999;font-size:0.85rem">Loading&#x2026;</p></div>
       <div class="add-item-form">
         <input type="text" id="newItemName" placeholder="Item name">
         <input type="number" id="newItemPrice" step="0.01" min="0.01" placeholder="Price ($)">
         <input type="number" id="newItemStock" step="1" min="0" placeholder="Initial stock">
+        <select id="newItemCategory"><option value="">No category</option></select>
         <button id="addItemBtn">Add item</button>
         <p class="msg" id="addItemMsg"></p>
       </div>
@@ -352,7 +377,7 @@ router.get('/', (req, res) => {
     refreshStatus();
     refreshStats();
     refreshOrders();
-    refreshItems();
+    refreshCategories();
     refreshEvents();
   });
 
@@ -362,7 +387,7 @@ router.get('/', (req, res) => {
     refreshStatus();
     refreshStats();
     refreshOrders();
-    refreshItems();
+    refreshCategories();
     refreshEvents();
     loadSettings();
     setInterval(refreshStatus, 15000);
@@ -461,6 +486,76 @@ router.get('/', (req, res) => {
     return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
   }
 
+  // Cached so the 30s item refresh can fill each item's category dropdown
+  // without refetching; reloaded whenever a category changes.
+  var categories = [];
+
+  function categoryOptions(selectedId) {
+    return '<option value="">No category</option>' + categories.map(function(c) {
+      return '<option value="' + c.id + '"' + (c.id === selectedId ? ' selected' : '') + '>' + escapeAttr(c.name) + '</option>';
+    }).join('');
+  }
+
+  function refreshCategories() {
+    api('GET', '/admin/categories').then(function(cats) {
+      categories = cats;
+      var el = document.getElementById('categoriesList');
+      el.innerHTML = cats.length ? cats.map(function(c, i) {
+        return '<div class="cat-row" data-id="' + c.id + '">' +
+          '<input class="cat-name-input" value="' + escapeAttr(c.name) + '">' +
+          '<button class="cat-move-btn" data-dir="up" title="Move up"' + (i === 0 ? ' disabled' : '') + '>&#x2191;</button>' +
+          '<button class="cat-move-btn" data-dir="down" title="Move down"' + (i === cats.length - 1 ? ' disabled' : '') + '>&#x2193;</button>' +
+          '<button class="cat-save-btn">Save</button>' +
+          '<button class="cat-del-btn">Delete</button>' +
+        '</div>';
+      }).join('') : '<p style="color:#999;font-size:0.85rem">No categories yet &#x2014; the buy page shows one plain list.</p>';
+      var newItemCategory = document.getElementById('newItemCategory');
+      newItemCategory.innerHTML = categoryOptions(newItemCategory.value);
+      refreshItems();
+    }).catch(function() {});
+  }
+
+  document.getElementById('categoriesList').addEventListener('click', function(e) {
+    var btn = e.target.closest('button');
+    if (!btn) return;
+    var row = btn.closest('.cat-row');
+    var id  = row.getAttribute('data-id');
+    var req;
+    if (btn.classList.contains('cat-save-btn')) {
+      var name = row.querySelector('.cat-name-input').value.trim();
+      if (!name) { alert('Name cannot be empty.'); return; }
+      req = api('PATCH', '/admin/categories/' + id, { name: name });
+    } else if (btn.classList.contains('cat-move-btn')) {
+      req = api('POST', '/admin/categories/' + id + '/move', { direction: btn.getAttribute('data-dir') });
+    } else if (btn.classList.contains('cat-del-btn')) {
+      var catName = row.querySelector('.cat-name-input').value;
+      if (!confirm('Delete category "' + catName + '"? Its items will not be deleted, just left without a category.')) return;
+      req = api('DELETE', '/admin/categories/' + id);
+    } else {
+      return;
+    }
+    btn.disabled = true;
+    req.then(function() { refreshCategories(); })
+      .catch(function(err) { alert(err.message); btn.disabled = false; });
+  });
+
+  document.getElementById('addCategoryBtn').addEventListener('click', function() {
+    var input = document.getElementById('newCategoryName');
+    var name  = input.value.trim();
+    var msg   = document.getElementById('addCategoryMsg');
+    if (!name) { flashMsg(msg, 'msg err', 'Enter a category name.', 4000); return; }
+    var btn = document.getElementById('addCategoryBtn');
+    btn.disabled = true;
+    api('POST', '/admin/categories', { name: name })
+      .then(function() {
+        input.value = '';
+        flashMsg(msg, 'msg ok', 'Category added.', 3000);
+        refreshCategories();
+      })
+      .catch(function(err) { flashMsg(msg, 'msg err', err.message, 5000); })
+      .finally(function() { btn.disabled = false; });
+  });
+
   function refreshItems() {
     api('GET', '/admin/items').then(function(items) {
       var el = document.getElementById('itemsList');
@@ -468,29 +563,49 @@ router.get('/', (req, res) => {
         el.innerHTML = '<p style="color:#999;font-size:0.85rem">No items yet.</p>';
         return;
       }
-      el.innerHTML = items.map(function(it) {
-        var dollars   = (it.price_cents / 100).toFixed(2);
-        var cardCls   = it.active ? 'item-card' : 'item-card item-inactive';
-        var disabled  = it.active ? '' : 'disabled';
-        var badges    = '';
-        if (!it.active) badges += '<span class="item-badge">Inactive</span>';
-        else if (it.stock <= 0) badges += '<span class="item-badge oos">Out of stock</span>';
-        var actionBtn = it.active
-          ? '<button class="item-del-btn" data-id="' + it.id + '">Delete</button>'
-          : '<button class="item-restore-btn" data-id="' + it.id + '">Restore</button>' +
-            '<button class="item-purge-btn" data-id="' + it.id + '">Delete permanently</button>';
-        return '<div class="' + cardCls + '" data-id="' + it.id + '">' +
-          '<input class="item-name-input" value="' + escapeAttr(it.name) + '" ' + disabled + '>' +
-          badges +
-          '<div class="item-fields">' +
-            '<input class="item-price-input" type="number" step="0.01" min="0.01" value="' + dollars + '" ' + disabled + '>' +
-            '<input class="item-stock-input" type="number" step="1" min="0" value="' + it.stock + '" ' + disabled + '>' +
-            (it.active ? '<button class="item-save-btn" data-id="' + it.id + '">Save</button>' : '') +
-            actionBtn +
-          '</div>' +
+      el.innerHTML = groupItems(items).map(function(g) {
+        return '<div class="item-group">' +
+          (g.name ? '<h3 class="item-group-heading">' + escapeAttr(g.name) + '</h3>' : '') +
+          g.items.map(itemCardHtml).join('') +
         '</div>';
       }).join('');
     }).catch(function() {});
+  }
+
+  // Same grouping as the buy page: categories in their set order, then
+  // uncategorized items last. No heading at all when nothing is categorized.
+  function groupItems(items) {
+    var byId   = {};
+    var groups = categories.map(function(c) { return byId[c.id] = { name: c.name, items: [] }; });
+    var none   = { name: 'No category', items: [] };
+    items.forEach(function(it) { (byId[it.category_id] || none).items.push(it); });
+    var nonEmpty = groups.concat([none]).filter(function(g) { return g.items.length > 0; });
+    if (nonEmpty.length === 1 && nonEmpty[0] === none) none.name = null;
+    return nonEmpty;
+  }
+
+  function itemCardHtml(it) {
+    var dollars   = (it.price_cents / 100).toFixed(2);
+    var cardCls   = it.active ? 'item-card' : 'item-card item-inactive';
+    var disabled  = it.active ? '' : 'disabled';
+    var badges    = '';
+    if (!it.active) badges += '<span class="item-badge">Inactive</span>';
+    else if (it.stock <= 0) badges += '<span class="item-badge oos">Out of stock</span>';
+    var actionBtn = it.active
+      ? '<button class="item-del-btn" data-id="' + it.id + '">Delete</button>'
+      : '<button class="item-restore-btn" data-id="' + it.id + '">Restore</button>' +
+        '<button class="item-purge-btn" data-id="' + it.id + '">Delete permanently</button>';
+    return '<div class="' + cardCls + '" data-id="' + it.id + '">' +
+      '<input class="item-name-input" value="' + escapeAttr(it.name) + '" ' + disabled + '>' +
+      badges +
+      '<select class="item-category-select" ' + disabled + '>' + categoryOptions(it.category_id) + '</select>' +
+      '<div class="item-fields">' +
+        '<input class="item-price-input" type="number" step="0.01" min="0.01" value="' + dollars + '" ' + disabled + '>' +
+        '<input class="item-stock-input" type="number" step="1" min="0" value="' + it.stock + '" ' + disabled + '>' +
+        (it.active ? '<button class="item-save-btn" data-id="' + it.id + '">Save</button>' : '') +
+        actionBtn +
+      '</div>' +
+    '</div>';
   }
 
   document.getElementById('itemsList').addEventListener('click', function(e) {
@@ -501,11 +616,12 @@ router.get('/', (req, res) => {
       var name  = card.querySelector('.item-name-input').value.trim();
       var price = parseFloat(card.querySelector('.item-price-input').value);
       var stock = parseInt(card.querySelector('.item-stock-input').value, 10);
+      var categoryId = card.querySelector('.item-category-select').value || null;
       if (!name)          { alert('Name cannot be empty.'); return; }
       if (!(price > 0))   { alert('Enter a valid price.'); return; }
       if (!(stock >= 0))  { alert('Enter a valid stock amount.'); return; }
       saveBtn.disabled = true;
-      api('PATCH', '/admin/items/' + id, { name: name, price_cents: Math.round(price * 100), stock: stock })
+      api('PATCH', '/admin/items/' + id, { name: name, price_cents: Math.round(price * 100), stock: stock, category_id: categoryId })
         .then(function() { refreshItems(); })
         .catch(function(err) { alert('Save failed: ' + err.message); saveBtn.disabled = false; });
       return;
@@ -550,9 +666,12 @@ router.get('/', (req, res) => {
     if (!name)         { flashMsg(msg, 'msg err', 'Enter an item name.', 4000); return; }
     if (!(price > 0))  { flashMsg(msg, 'msg err', 'Enter a valid price.', 4000); return; }
     if (!(stock >= 0)) { flashMsg(msg, 'msg err', 'Enter a valid stock amount.', 4000); return; }
+    var categoryId = document.getElementById('newItemCategory').value || null;
     var btn = document.getElementById('addItemBtn');
     btn.disabled = true;
-    api('POST', '/admin/items', { name: name, price_cents: Math.round(price * 100), stock: stock })
+    // The category picker is left as-is so a run of items in the same
+    // category doesn't need it re-picked each time.
+    api('POST', '/admin/items', { name: name, price_cents: Math.round(price * 100), stock: stock, category_id: categoryId })
       .then(function() {
         document.getElementById('newItemName').value  = '';
         document.getElementById('newItemPrice').value = '';
@@ -848,6 +967,13 @@ router.get('/items', requireAdmin, async (req, res) => {
   }
 });
 
+// Empty/null means "no category". Returns undefined for an unknown id.
+async function resolveCategoryId(value) {
+  if (value === null || value === '') return null;
+  const category = await getCategory(value);
+  return category ? category.id : undefined;
+}
+
 router.post('/items', requireAdmin, async (req, res) => {
   const name  = typeof req.body.name === 'string' ? req.body.name.trim() : '';
   const price = parseInt(req.body.price_cents, 10);
@@ -856,7 +982,9 @@ router.post('/items', requireAdmin, async (req, res) => {
   if (!Number.isFinite(price) || price <= 0) return res.status(400).json({ error: 'price_cents must be a positive integer' });
   if (!Number.isInteger(stock) || stock < 0) return res.status(400).json({ error: 'stock must be a non-negative integer' });
   try {
-    const item = await createItem({ name, price_cents: price, stock });
+    const category_id = await resolveCategoryId(req.body.category_id ?? null);
+    if (category_id === undefined) return res.status(400).json({ error: 'Unknown category' });
+    const item = await createItem({ name, price_cents: price, stock, category_id });
     res.json(item);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -881,8 +1009,13 @@ router.patch('/items/:id', requireAdmin, async (req, res) => {
     updates.stock = stock;
   }
   if (req.body.active !== undefined) updates.active = !!req.body.active;
-  if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No valid fields to update' });
   try {
+    if (req.body.category_id !== undefined) {
+      const category_id = await resolveCategoryId(req.body.category_id);
+      if (category_id === undefined) return res.status(400).json({ error: 'Unknown category' });
+      updates.category_id = category_id;
+    }
+    if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'No valid fields to update' });
     res.json(await updateItem(req.params.id, updates));
   } catch (err) {
     res.status(404).json({ error: err.message });
@@ -907,6 +1040,64 @@ router.delete('/items/:id', requireAdmin, async (req, res) => {
     }
     await deleteItem(item.id);
     res.json({ ok: true, deactivated: false });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Categories ────────────────────────────────────────────────────────────────
+
+const DUPLICATE_KEY = '23505';
+
+router.get('/categories', requireAdmin, async (req, res) => {
+  try {
+    res.json(await getCategories());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/categories', requireAdmin, async (req, res) => {
+  const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  try {
+    res.json(await createCategory(name));
+  } catch (err) {
+    if (err.code === DUPLICATE_KEY) return res.status(400).json({ error: 'A category with that name already exists' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.patch('/categories/:id', requireAdmin, async (req, res) => {
+  const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+  if (!name) return res.status(400).json({ error: 'name cannot be empty' });
+  try {
+    if (!await getCategory(req.params.id)) return res.status(404).json({ error: 'Category not found' });
+    res.json(await renameCategory(req.params.id, name));
+  } catch (err) {
+    if (err.code === DUPLICATE_KEY) return res.status(400).json({ error: 'A category with that name already exists' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Body: { direction: 'up' | 'down' } — earlier categories show first on the buy page.
+router.post('/categories/:id/move', requireAdmin, async (req, res) => {
+  const { direction } = req.body || {};
+  if (direction !== 'up' && direction !== 'down') return res.status(400).json({ error: 'direction must be "up" or "down"' });
+  try {
+    if (!await getCategory(req.params.id)) return res.status(404).json({ error: 'Category not found' });
+    await moveCategory(req.params.id, direction);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/categories/:id', requireAdmin, async (req, res) => {
+  try {
+    if (!await getCategory(req.params.id)) return res.status(404).json({ error: 'Category not found' });
+    await deleteCategory(req.params.id);
+    res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

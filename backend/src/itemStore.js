@@ -17,6 +17,26 @@ async function initItemsTable() {
     )
   `);
 
+  // Categories group items into sections on the buy page, shown in
+  // `position` order. Uncategorized items (category_id NULL) go last.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS categories (
+      id          UUID PRIMARY KEY,
+      name        TEXT NOT NULL,
+      position    INT NOT NULL DEFAULT 0,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS categories_name_unique ON categories (LOWER(name))`);
+  // Checked by hand rather than ADD COLUMN IF NOT EXISTS, which on some
+  // Postgres versions still adds a duplicate foreign key every boot.
+  const { rows: catCol } = await pool.query(
+    `SELECT 1 FROM information_schema.columns WHERE table_name = 'items' AND column_name = 'category_id'`
+  );
+  if (catCol.length === 0) {
+    await pool.query(`ALTER TABLE items ADD COLUMN category_id UUID REFERENCES categories(id) ON DELETE SET NULL`);
+  }
+
   // One-time migration: seed the catalog from the old single-item env vars
   // so existing deployments keep selling without any admin action required.
   const { rows } = await pool.query('SELECT COUNT(*) FROM items');
@@ -53,12 +73,12 @@ async function getItem(id) {
   return rows[0] ?? null;
 }
 
-async function createItem({ name, price_cents, stock }) {
+async function createItem({ name, price_cents, stock, category_id = null }) {
   const id = uuidv4();
   const { rows } = await pool.query(
-    `INSERT INTO items (id, name, price_cents, stock, active)
-     VALUES ($1, $2, $3, $4, true) RETURNING *`,
-    [id, name, price_cents, stock]
+    `INSERT INTO items (id, name, price_cents, stock, active, category_id)
+     VALUES ($1, $2, $3, $4, true, $5) RETURNING *`,
+    [id, name, price_cents, stock, category_id]
   );
   return rows[0];
 }
@@ -143,6 +163,65 @@ async function restoreStockForItems(items) {
   }
 }
 
+// ── Categories ────────────────────────────────────────────────────────────────
+
+async function getCategories() {
+  const { rows } = await pool.query('SELECT * FROM categories ORDER BY position ASC, created_at ASC');
+  return rows;
+}
+
+async function getCategory(id) {
+  // id comes from the admin panel's request body.
+  if (!isUuid(id)) return null;
+  const { rows } = await pool.query('SELECT * FROM categories WHERE id = $1', [id]);
+  return rows[0] ?? null;
+}
+
+// Names are unique ignoring case (categories_name_unique), so these throw a
+// Postgres error with code 23505 on a duplicate.
+async function createCategory(name) {
+  const { rows } = await pool.query(
+    `INSERT INTO categories (id, name, position)
+     VALUES ($1, $2, (SELECT COALESCE(MAX(position), -1) + 1 FROM categories))
+     RETURNING *`,
+    [uuidv4(), name]
+  );
+  return rows[0];
+}
+
+async function renameCategory(id, name) {
+  const { rows } = await pool.query(
+    'UPDATE categories SET name = $2 WHERE id = $1 RETURNING *',
+    [id, name]
+  );
+  if (rows.length === 0) throw new Error(`Category not found: ${id}`);
+  return rows[0];
+}
+
+// Swaps a category with its neighbour, then renumbers every position so
+// they stay a clean 0..n-1 sequence. Moving past either end is a no-op.
+async function moveCategory(id, direction) {
+  const ids = (await getCategories()).map((c) => c.id);
+  const from = ids.indexOf(id);
+  if (from === -1) throw new Error(`Category not found: ${id}`);
+  const to = direction === 'up' ? from - 1 : from + 1;
+  if (to < 0 || to >= ids.length) return;
+  [ids[from], ids[to]] = [ids[to], ids[from]];
+  await pool.query(
+    `UPDATE categories c SET position = v.pos - 1
+     FROM unnest($1::uuid[]) WITH ORDINALITY AS v(id, pos)
+     WHERE c.id = v.id`,
+    [ids]
+  );
+}
+
+// Items in the category aren't deleted; the foreign key's ON DELETE SET NULL
+// leaves them uncategorized.
+async function deleteCategory(id) {
+  const { rowCount } = await pool.query('DELETE FROM categories WHERE id = $1', [id]);
+  if (rowCount === 0) throw new Error(`Category not found: ${id}`);
+}
+
 module.exports = {
   initItemsTable,
   getActiveItems,
@@ -154,4 +233,10 @@ module.exports = {
   itemHasOrders,
   decrementStockForItems,
   restoreStockForItems,
+  getCategories,
+  getCategory,
+  createCategory,
+  renameCategory,
+  moveCategory,
+  deleteCategory,
 };
