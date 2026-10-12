@@ -9,6 +9,7 @@ const {
   getAllItems, getItem, createItem, updateItem, deleteItem, itemHasOrders,
 } = require('../itemStore');
 const { createRefund } = require('../square');
+const { US_TIMEZONES, getSettings, setSetting } = require('../settingsStore');
 
 const DEVICE_ID = () => process.env.DEVICE_ID || 'onigiri';
 
@@ -76,11 +77,13 @@ router.get('/', (req, res) => {
     .emoji { font-size: 2.5rem; margin-bottom: 0.75rem; }
     h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 1.25rem; }
     h2 { font-size: 1rem; font-weight: 600; margin-bottom: 1rem; color: #333; }
-    input {
+    input, select {
       width: 100%; border: 1.5px solid #e0e0e0; border-radius: 10px;
       padding: 0.75rem; font-size: 0.95rem; margin-bottom: 0.75rem; font-family: inherit;
     }
-    input:focus { outline: none; border-color: #999; }
+    select { background: #fff; color: #111; }
+    input:focus, select:focus { outline: none; border-color: #999; }
+    .field-label { display: block; font-size: 0.85rem; color: #666; margin-bottom: 0.4rem; }
     button {
       background: #111; color: #fff; border: none; border-radius: 12px;
       padding: 0.85rem 1rem; font-size: 0.95rem; font-weight: 600;
@@ -256,6 +259,15 @@ router.get('/', (req, res) => {
     </div>
 
     <div class="card">
+      <h2>Settings</h2>
+      <label class="field-label" for="tzSelect">Store time zone (when &ldquo;Today&rdquo; starts)</label>
+      <select id="tzSelect"></select>
+      <p class="status-sub" id="tzNow" style="margin:-0.35rem 0 0.75rem"></p>
+      <button id="settingsBtn">Save</button>
+      <p class="msg" id="settingsMsg"></p>
+    </div>
+
+    <div class="card">
       <h2>Firmware Update</h2>
       <input type="url" id="otaUrl" placeholder="https://github.com/.../firmware.bin">
       <button id="otaBtn">Push Update</button>
@@ -352,7 +364,9 @@ router.get('/', (req, res) => {
     refreshOrders();
     refreshItems();
     refreshEvents();
+    loadSettings();
     setInterval(refreshStatus, 15000);
+    setInterval(showStoreTime, 30000);
     setInterval(refreshStats,  60000);
     setInterval(refreshOrders, 30000);
     setInterval(refreshItems,  30000);
@@ -682,6 +696,49 @@ router.get('/', (req, res) => {
     });
   });
 
+  var tzSelect    = document.getElementById('tzSelect');
+  var tzNow       = document.getElementById('tzNow');
+  var settingsBtn = document.getElementById('settingsBtn');
+  var settingsMsg = document.getElementById('settingsMsg');
+
+  // Shows the current time in the selected zone, so a wrong pick is obvious
+  // before saving.
+  function showStoreTime() {
+    if (!tzSelect.value) return;
+    tzNow.textContent = 'Time there now: ' + new Date().toLocaleTimeString('en-US', {
+      timeZone: tzSelect.value, hour: 'numeric', minute: '2-digit',
+    });
+  }
+
+  function loadSettings() {
+    api('GET', '/admin/settings').then(function(d) {
+      tzSelect.innerHTML = '';
+      d.timezones.forEach(function(tz) {
+        var opt = document.createElement('option');
+        opt.value = tz.id;
+        opt.textContent = tz.label;
+        tzSelect.appendChild(opt);
+      });
+      tzSelect.value = d.settings.timezone;
+      showStoreTime();
+    }).catch(function() {});
+  }
+
+  tzSelect.addEventListener('change', showStoreTime);
+
+  settingsBtn.addEventListener('click', function() {
+    settingsBtn.disabled = true;
+    flashMsg(settingsMsg, 'msg', '', 0);
+    api('PATCH', '/admin/settings', { timezone: tzSelect.value }).then(function() {
+      flashMsg(settingsMsg, 'msg ok', 'Saved.', 4000);
+      refreshStats();
+    }).catch(function(e) {
+      flashMsg(settingsMsg, 'msg err', e.message, 5000);
+    }).finally(function() {
+      settingsBtn.disabled = false;
+    });
+  });
+
   var wifiResetBtn = document.getElementById('wifiResetBtn');
   var wifiResetMsg = document.getElementById('wifiResetMsg');
 
@@ -751,8 +808,31 @@ router.post('/wifi-reset', requireAdmin, (req, res) => {
 
 router.get('/stats', requireAdmin, async (req, res) => {
   try {
-    const stats = await getOrderStats();
+    const { timezone } = await getSettings();
+    const stats = await getOrderStats(timezone);
     res.json(stats);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+
+router.get('/settings', requireAdmin, async (req, res) => {
+  try {
+    res.json({ settings: await getSettings(), timezones: US_TIMEZONES });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.patch('/settings', requireAdmin, async (req, res) => {
+  const { timezone } = req.body || {};
+  if (timezone === undefined) return res.status(400).json({ error: 'No valid fields to update' });
+  if (!US_TIMEZONES.some((tz) => tz.id === timezone)) return res.status(400).json({ error: 'Unsupported time zone' });
+  try {
+    await setSetting('timezone', timezone);
+    res.json({ settings: await getSettings() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

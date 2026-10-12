@@ -5,7 +5,7 @@
 function squareHeaders() {
   return {
     'Authorization': `Bearer ${process.env.SQUARE_ACCESS_TOKEN}`,
-    'Content-Type':  'application/json',
+    'Content-Type':   'application/json',
     'Square-Version': '2024-01-18',
   };
 }

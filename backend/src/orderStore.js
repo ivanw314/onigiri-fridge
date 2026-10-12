@@ -316,14 +316,19 @@ async function deleteAllOrders() {
   return rowCount;
 }
 
-async function getOrderStats() {
+// "Today" starts at midnight in the store's time zone, not the database
+// server's (UTC by default, which rolled the day over at 5 PM Pacific).
+// AT TIME ZONE handles daylight saving.
+async function getOrderStats(timezone) {
   const [{ rows: todayRows }, { rows: totalRows }] = await Promise.all([
     pool.query(
       `SELECT COALESCE(SUM(oi.quantity), 0) AS count,
               COALESCE(SUM(oi.quantity * oi.unit_price_cents), 0) AS revenue_cents
        FROM orders o
        JOIN order_items oi ON oi.order_id = o.id
-       WHERE o.status = 'complete' AND o.created_at >= CURRENT_DATE`
+       WHERE o.status = 'complete'
+         AND o.created_at >= date_trunc('day', NOW() AT TIME ZONE $1) AT TIME ZONE $1`,
+      [timezone]
     ),
     pool.query(
       `SELECT COALESCE(SUM(oi.quantity), 0) AS count,

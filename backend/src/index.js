@@ -8,6 +8,7 @@ const {
   getInProgressOrderForDevice, markDoorOpened, completeOrderIfDoorOpened, completeStaleDispensingOrders,
 } = require('./orderStore');
 const { initItemsTable, restoreStockForItems } = require('./itemStore');
+const { initSettingsTable } = require('./settingsStore');
 const { createRefund } = require('./square');
 
 const app = express();
@@ -108,6 +109,7 @@ const PORT = process.env.PORT || 3000;
 async function start() {
   await initDB();
   await initItemsTable();
+  await initSettingsTable();
   await connectMQTT();
 
   // Sweep abandoned pending orders (checkout started, never paid) over to
