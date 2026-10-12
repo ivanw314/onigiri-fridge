@@ -1,7 +1,9 @@
 'use strict';
 const crypto = require('crypto');
 const { Router } = require('express');
-const { getOrder, updateOrder, isDuplicateEvent } = require('../orderStore');
+const {
+  getOrder, updateOrder, isDuplicateEvent, claimPendingOrderForPayment, claimUnpaidOrderForLateRefund,
+} = require('../orderStore');
 const { decrementStockForItems, restoreStockForItems } = require('../itemStore');
 const { getSquareOrder, createRefund } = require('../square');
 const { publishUnlock } = require('../mqttClient');
@@ -97,21 +99,39 @@ async function handleSquareWebhook(req) {
     return;
   }
 
-  // Guard against double-processing (idempotent at order level too)
-  if (order.status !== 'pending') {
-    console.log(`[WEBHOOK] Order ${order_id} already in status ${order.status} — skipping`);
+  // Use the amount Square actually charged (includes tax) rather than
+  // re-summing order_items, which is pre-tax and would short-refund.
+  const amount_cents = payment.amount_money?.amount ?? order.items.reduce((sum, it) => sum + it.quantity * it.unit_price_cents, 0);
+  const paymentFields = { square_payment_id: payment.id, square_order_id: payment.order_id, total_cents: amount_cents };
+
+  // 7. Claim the order for this payment. Only a still-pending order can be
+  //    claimed, and only once, so duplicate notifications and the expiry
+  //    sweep can't race it.
+  if (!(await claimPendingOrderForPayment(order_id, paymentFields))) {
+    // Not pending any more: either a repeat notification for a payment we've
+    // already handled, or the customer paid after the order expired or was
+    // cancelled (Square payment links never expire on their own). Refund the
+    // latter rather than leave the customer charged for nothing.
+    if (await claimUnpaidOrderForLateRefund(order_id, paymentFields)) {
+      console.warn(`[WEBHOOK] Payment for order ${order_id} arrived after it was ${order.status} — refunding`);
+      try {
+        await createRefund({ payment_id: payment.id, order_id, amount_cents, reason: 'Checkout expired before payment completed' });
+        console.log(`[REFUND] Square refund issued for order ${order_id} (late payment)`);
+      } catch (refundErr) {
+        console.error(`[REFUND] Square refund failed for order ${order_id}:`, refundErr.message);
+      }
+    } else {
+      console.log(`[WEBHOOK] Order ${order_id} already in status ${order.status} — skipping`);
+    }
     return;
   }
 
-  // 7. Decrement stock for every item in the cart now that money has actually
+  // 8. Decrement stock for every item in the cart now that money has actually
   //    been captured. This is atomic across the whole order (see
   //    decrementStockForItems) — if stock ran out for even one line item
   //    between checkout creation and payment completion (race with another
   //    buyer), none of it is taken, and we refund instead of unlocking for
   //    items we don't have.
-  // Use the amount Square actually charged (includes tax) rather than
-  // re-summing order_items, which is pre-tax and would short-refund.
-  const amount_cents = payment.amount_money?.amount ?? order.items.reduce((sum, it) => sum + it.quantity * it.unit_price_cents, 0);
   const stockLines = order.items.filter((it) => it.item_id).map((it) => ({ item_id: it.item_id, quantity: it.quantity }));
 
   if (stockLines.length > 0) {
@@ -129,14 +149,7 @@ async function handleSquareWebhook(req) {
     }
   }
 
-  // 8. Mark paid and publish the MQTT unlock command
-  await updateOrder(order_id, {
-    status:            'paid',
-    square_payment_id: payment.id,
-    square_order_id:   payment.order_id,
-    total_cents:       amount_cents,
-  });
-
+  // 9. Publish the MQTT unlock command
   try {
     publishUnlock(order.device_id, order_id);
     // Status advances to 'dispensing' when the device publishes an 'unlocked' event

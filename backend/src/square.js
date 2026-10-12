@@ -133,14 +133,14 @@ async function getSquareOrder(square_order_id) {
 // Issues a full refund for a completed Square payment.
 // Called when an order transitions to 'refunded' after a failed or timed-out unlock.
 
-async function createRefund({ payment_id, order_id, amount_cents }) {
+async function createRefund({ payment_id, order_id, amount_cents, reason = 'Unlock timeout — item not dispensed' }) {
   const cents = amount_cents ?? parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
   return squareFetch('/v2/refunds', {
     method: 'POST',
     body: JSON.stringify({
       idempotency_key: `refund-${order_id}`,
       payment_id,
-      reason: 'Unlock timeout — item not dispensed',
+      reason,
       amount_money: {
         amount:   cents,
         currency: 'USD',

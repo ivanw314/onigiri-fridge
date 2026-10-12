@@ -61,7 +61,9 @@ async function initDB() {
 // abandoned. Kept as a single constant since it's checked in two places:
 // deciding whether a device still has an order "in progress", and sweeping
 // stale rows over to 'timed_out' so they don't sit there as 'pending' forever.
-const PENDING_ORDER_TIMEOUT_MINUTES = 2;
+// Square payment links never expire, so a customer can still pay after this —
+// the webhook refunds those payments automatically.
+const PENDING_ORDER_TIMEOUT_MINUTES = 3;
 
 async function getActiveOrderForDevice(device_id) {
   const { rows } = await pool.query(
@@ -99,19 +101,60 @@ async function cancelPendingOrderForDevice(device_id) {
 // over to 'timed_out'. No refund or stock restore needed here — stock is
 // only decremented once the Square webhook confirms payment (see
 // webhook.js), so an order still 'pending' at this point never touched it.
+// A single conditional UPDATE so it can't overwrite a payment the webhook
+// claims at the same moment — whichever lands first wins.
 async function expireStalePendingOrders() {
   const { rows } = await pool.query(
-    `SELECT id FROM orders
+    `UPDATE orders SET status = 'timed_out', updated_at = NOW()
      WHERE status = 'pending'
-       AND created_at <= NOW() - INTERVAL '${PENDING_ORDER_TIMEOUT_MINUTES} minutes'`
+       AND created_at <= NOW() - INTERVAL '${PENDING_ORDER_TIMEOUT_MINUTES} minutes'
+     RETURNING id`
   );
   for (const { id } of rows) {
-    await updateOrder(id, { status: 'timed_out' });
+    console.log(`[ORDER] ${id} → timed_out`);
+    _notifySSEClients(id, 'timed_out');
   }
   if (rows.length > 0) {
     console.log(`[ORDER] Expired ${rows.length} stale pending order(s)`);
   }
   return rows.length;
+}
+
+// Marks a pending order paid and records its payment. A single conditional
+// UPDATE, so if Square delivers the same payment twice at once, or the
+// expiry sweep runs at the same moment, only one of them wins. Returns false
+// if the order wasn't pending any more.
+async function claimPendingOrderForPayment(order_id, { square_payment_id, square_order_id, total_cents }) {
+  const { rows } = await pool.query(
+    `UPDATE orders
+     SET status = 'paid', square_payment_id = $2, square_order_id = $3, total_cents = $4, updated_at = NOW()
+     WHERE id = $1 AND status = 'pending'
+     RETURNING id`,
+    [order_id, square_payment_id, square_order_id, total_cents]
+  );
+  if (rows.length === 0) return false;
+  console.log(`[ORDER] ${order_id} → paid`);
+  _notifySSEClients(order_id, 'paid');
+  return true;
+}
+
+// For a payment that arrived after its order expired or was cancelled:
+// records the payment and marks the order refunded — but only if the order
+// has never had a payment. Square sends several notifications per payment,
+// and the repeats for a payment we've already handled must not trigger a
+// refund. Returns false if there's nothing to refund.
+async function claimUnpaidOrderForLateRefund(order_id, { square_payment_id, square_order_id, total_cents }) {
+  const { rows } = await pool.query(
+    `UPDATE orders
+     SET status = 'refunded', square_payment_id = $2, square_order_id = $3, total_cents = $4, updated_at = NOW()
+     WHERE id = $1 AND status <> 'pending' AND square_payment_id IS NULL
+     RETURNING id`,
+    [order_id, square_payment_id, square_order_id, total_cents]
+  );
+  if (rows.length === 0) return false;
+  console.log(`[ORDER] ${order_id} → refunded`);
+  _notifySSEClients(order_id, 'refunded');
+  return true;
 }
 
 // How far back to look when matching a device event to an order: long
@@ -337,6 +380,8 @@ module.exports = {
   getActiveOrderForDevice,
   cancelPendingOrderForDevice,
   expireStalePendingOrders,
+  claimPendingOrderForPayment,
+  claimUnpaidOrderForLateRefund,
   getInProgressOrderForDevice,
   markDoorOpened,
   completeOrderIfDoorOpened,
