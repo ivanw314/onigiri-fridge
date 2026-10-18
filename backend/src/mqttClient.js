@@ -19,6 +19,7 @@ const adminUnlocks = new Set(); // device_id
 const MAX_EVENTS      = 50;
 const recentEvents    = []; // newest-first ring buffer
 const otaPending      = new Set(); // devices mid-OTA (ota_start seen, not yet back online)
+const RESTART_EVENTS  = new Set(['ota_start', 'rebooting', 'wifi_updating', 'wifi_reset']);
 const deviceWifiInfo  = new Map(); // device_id → { ssid, rssi, ts }
 
 function pushEvent(device_id, event) {
@@ -141,10 +142,12 @@ function handleMessage(topic, rawPayload) {
       return; // metadata only — not shown in activity log
     }
 
-    if (event === 'ota_start') {
-      otaPending.add(device_id);
-      deviceHeartbeats.delete(device_id); // clean disconnect won't trigger LWT, so force offline state
-    }
+    // The device restarts right after announcing these. Treat it as offline
+    // now rather than once its last heartbeat goes stale (up to 90s), so
+    // nobody can pay for an unlock it will never receive. (For ota_start the
+    // clean disconnect also means no LWT would ever mark it offline.)
+    if (RESTART_EVENTS.has(event)) deviceHeartbeats.delete(device_id);
+    if (event === 'ota_start') otaPending.add(device_id);
     if (event === 'ota_failed') otaPending.delete(device_id);
     pushEvent(device_id, event);
     console.log(`[MQTT] Event from ${device_id}: ${event}`, order_id ? `(order ${order_id})` : '');

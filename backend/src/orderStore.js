@@ -67,7 +67,7 @@ const PENDING_ORDER_TIMEOUT_MINUTES = 3;
 
 async function getActiveOrderForDevice(device_id) {
   const { rows } = await pool.query(
-    `SELECT id FROM orders
+    `SELECT id, status FROM orders
      WHERE device_id = $1
        AND status IN ('pending', 'paid', 'dispensing')
        AND created_at > NOW() - INTERVAL '${PENDING_ORDER_TIMEOUT_MINUTES} minutes'
@@ -168,7 +168,7 @@ const IN_PROGRESS_ORDER_WINDOW_MINUTES = 15;
 // memory, so a server restart mid-sale doesn't lose track of the order.
 async function getInProgressOrderForDevice(device_id) {
   const { rows } = await pool.query(
-    `SELECT id FROM orders
+    `SELECT id, status FROM orders
      WHERE device_id = $1
        AND status IN ('paid', 'dispensing')
        AND created_at > NOW() - INTERVAL '${IN_PROGRESS_ORDER_WINDOW_MINUTES} minutes'

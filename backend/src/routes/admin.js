@@ -4,7 +4,10 @@ const {
   publishOTA, publishLock, publishAdminUnlock, publishReboot, publishWifiUpdate, publishWifiReset,
   isDeviceOnline, getDeviceLastSeen, getDeviceWifiInfo, getRecentEvents,
 } = require('../mqttClient');
-const { getRecentOrders, getOrderStats, getInsights, getOrder, updateOrder, deleteOrder, deleteAllOrders } = require('../orderStore');
+const {
+  getRecentOrders, getOrderStats, getInsights, getOrder, updateOrder, deleteOrder, deleteAllOrders,
+  getActiveOrderForDevice, getInProgressOrderForDevice,
+} = require('../orderStore');
 const {
   getAllItems, getItem, createItem, updateItem, deleteItem, itemHasOrders, adjustStock,
   getCategories, getCategory, createCategory, renameCategory, moveCategory, deleteCategory,
@@ -72,9 +75,13 @@ router.get('/', (req, res) => {
     [hidden] { display: none !important; }
     body { font-family: system-ui, -apple-system, sans-serif; background: #f4f4ef; color: #111; min-height: 100dvh; }
     #login     { display: none; align-items: center; justify-content: center; min-height: 100dvh; padding: 1.5rem; }
-    #dashboard { display: none; }
+    /* App shell: header, scrolling content, tab bar stacked to fill the
+       screen. Nothing is position: fixed, because iOS Safari shifts fixed
+       bars around while its toolbar resizes and during overscroll bounce. */
+    #dashboard { display: none; flex-direction: column; height: 100vh; height: 100dvh; }
+    #scroller  { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain; }
     .wrap { max-width: 480px; margin: 0 auto; }
-    main.wrap { padding: 1rem 1rem calc(5.5rem + env(safe-area-inset-bottom)); }
+    .content { padding: 1rem 1rem 1.5rem; }
     .tab { display: flex; flex-direction: column; gap: 1rem; }
     .card { background: #fff; border-radius: 20px; padding: 1.75rem 1.5rem; box-shadow: 0 4px 24px rgba(0,0,0,0.07); }
     #login .card { max-width: 340px; width: 100%; text-align: center; }
@@ -144,17 +151,12 @@ router.get('/', (req, res) => {
 
     /* Header (every tab) and bottom tab bar */
     .topbar {
-      position: sticky; top: 0; z-index: 10;
-      background: rgba(244,244,239,0.92); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+      flex-shrink: 0; background: #f4f4ef;
       border-bottom: 1px solid #e6e6df; padding: calc(env(safe-area-inset-top) + 0.6rem) 1rem 0.6rem;
     }
     .topbar-inner { display: flex; align-items: center; gap: 0.6rem; }
     .topbar-text  { flex: 1; min-width: 0; }
-    .tabbar {
-      position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
-      background: rgba(255,255,255,0.94); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
-      border-top: 1px solid #e6e6df; padding-bottom: env(safe-area-inset-bottom);
-    }
+    .tabbar { flex-shrink: 0; background: #fff; border-top: 1px solid #e6e6df; padding-bottom: env(safe-area-inset-bottom); }
     .tabbar-inner { display: grid; grid-template-columns: repeat(5, 1fr); }
     .tab-btn {
       position: relative; background: none; color: #999; border-radius: 0;
@@ -331,7 +333,8 @@ router.get('/', (req, res) => {
     </div>
   </header>
 
-  <main class="wrap">
+  <main id="scroller">
+  <div class="wrap content">
 
     <section class="tab" data-tab="home" hidden>
       <div class="card">
@@ -522,6 +525,7 @@ router.get('/', (req, res) => {
       <button class="secondary" id="logoutBtn">Sign out</button>
     </section>
 
+  </div>
   </main>
 
   <nav class="tabbar" aria-label="Sections">
@@ -567,7 +571,12 @@ router.get('/', (req, res) => {
     }).then(function(r) {
       if (r.status === 401) { doLogout(); throw new Error('Wrong password.'); }
       return r.json().then(function(data) {
-        if (!r.ok) throw new Error(data.error || 'Request failed');
+        if (!r.ok) {
+          var err = new Error(data.error || 'Request failed');
+          err.status = r.status;
+          err.data   = data;
+          throw err;
+        }
         return data;
       });
     });
@@ -628,6 +637,7 @@ router.get('/', (req, res) => {
   var tabTimer    = null;
   var tabSections = document.querySelectorAll('.tab');
   var tabButtons  = document.querySelectorAll('.tab-btn');
+  var scroller    = document.getElementById('scroller');   // the only part of the page that scrolls
 
   function startPolling() {
     stopPolling();
@@ -651,7 +661,7 @@ router.get('/', (req, res) => {
       if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
     });
     try { localStorage.setItem('adminTab', name); } catch (e) {}
-    window.scrollTo(0, 0);
+    scroller.scrollTop = 0;
     TAB_REFRESH[name].run();
     if (!document.hidden) startPolling();
   }
@@ -659,7 +669,7 @@ router.get('/', (req, res) => {
   tabButtons.forEach(function(b) {
     b.addEventListener('click', function() {
       var name = b.getAttribute('data-tab');
-      if (name === activeTab) { window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+      if (name === activeTab) { scroller.scrollTo({ top: 0, behavior: 'smooth' }); return; }
       location.hash = name;
     });
   });
@@ -689,7 +699,7 @@ router.get('/', (req, res) => {
 
   function showDashboard() {
     loginEl.style.display = 'none';
-    dashboardEl.style.display = 'block';
+    dashboardEl.style.display = 'flex';
     dashboardOn = true;
     refreshStatus();
     loadSettings();
@@ -1565,12 +1575,34 @@ router.get('/', (req, res) => {
     }).catch(function() {});
   }
 
-  function doAction(path, btnId, msgId, label) {
+  // Reboot, WiFi changes and OTA all restart the device. The server refuses
+  // those (409) while a customer order is in progress, so ask first and then
+  // resend with force. Cancelling rejects with an empty message so the
+  // button shows nothing. On success, check status soon so the header shows
+  // Offline without waiting for the next poll.
+  function withRestartCheck(path, body) {
+    return api('POST', path, body).catch(function(err) {
+      var busy = err.data && err.data.order_in_progress;
+      if (!busy) throw err;
+      if (!confirm('A customer order is in progress (' + busy.id.slice(0, 8) + ', ' + busy.status + '). Restarting now could stop them opening the door. Restart anyway?')) {
+        throw new Error('');
+      }
+      var forced = {};
+      Object.keys(body || {}).forEach(function(k) { forced[k] = body[k]; });
+      forced.force = true;
+      return api('POST', path, forced);
+    }).then(function(data) {
+      setTimeout(refreshStatus, 2000);
+      return data;
+    });
+  }
+
+  function doAction(path, btnId, msgId, label, restarts) {
     var btn = document.getElementById(btnId);
     var msg = document.getElementById(msgId);
     btn.disabled = true;
     flashMsg(msg, 'msg', '', 0);
-    api('POST', path).then(function() {
+    (restarts ? withRestartCheck(path) : api('POST', path)).then(function() {
       flashMsg(msg, 'msg ok', label + ' sent.', 4000);
     }).catch(function(e) {
       flashMsg(msg, 'msg err', e.message, 5000);
@@ -1587,22 +1619,25 @@ router.get('/', (req, res) => {
   });
   document.getElementById('rebootBtn').addEventListener('click', function() {
     if (!confirm('Reboot the fridge controller?')) return;
-    doAction('/admin/reboot', 'rebootBtn', 'rebootMsg', 'Reboot');
+    doAction('/admin/reboot', 'rebootBtn', 'rebootMsg', 'Reboot', true);
   });
 
   var otaUrlInput = document.getElementById('otaUrl');
   var otaBtn      = document.getElementById('otaBtn');
   var otaMsg      = document.getElementById('otaMsg');
 
-  otaUrlInput.value = localStorage.getItem('lastOtaUrl') || '';
+  // The field used to be refilled with the last URL pushed, which left an
+  // old firmware link sitting there. Drop what earlier versions stored.
+  try { localStorage.removeItem('lastOtaUrl'); } catch (e) {}
 
   otaBtn.addEventListener('click', function() {
     var url = otaUrlInput.value.trim();
     if (!url) { flashMsg(otaMsg, 'msg err', 'Enter a URL.', 4000); return; }
-    localStorage.setItem('lastOtaUrl', url);
     otaBtn.disabled = true;
     flashMsg(otaMsg, 'msg', '', 0);
-    api('POST', '/admin/ota', { url: url }).then(function() {
+    withRestartCheck('/admin/ota', { url: url }).then(function() {
+      // Kept on failure so it can be retried; cleared once it's been sent.
+      otaUrlInput.value = '';
       flashMsg(otaMsg, 'msg ok', 'OTA command sent — device will reboot shortly.', 5000);
     }).catch(function(e) {
       flashMsg(otaMsg, 'msg err', e.message, 5000);
@@ -1625,7 +1660,7 @@ router.get('/', (req, res) => {
     }
     wifiBtn.disabled = true;
     flashMsg(wifiMsg, 'msg', '', 0);
-    api('POST', '/admin/wifi', { ssid: ssid, password: pass }).then(function() {
+    withRestartCheck('/admin/wifi', { ssid: ssid, password: pass }).then(function() {
       flashMsg(wifiMsg, 'msg ok', 'Sent — device will reconnect shortly.', 5000);
       wifiPassInput.value = '';
     }).catch(function(e) {
@@ -1643,7 +1678,7 @@ router.get('/', (req, res) => {
     if (!confirm('Second confirmation: fridge goes offline now. Proceed?')) return;
     wifiResetBtn.disabled = true;
     flashMsg(wifiResetMsg, 'msg', '', 0);
-    api('POST', '/admin/wifi-reset').then(function() {
+    withRestartCheck('/admin/wifi-reset').then(function() {
       flashMsg(wifiResetMsg, 'msg ok', 'Done — device is rebooting into setup mode.', 5000);
     }).catch(function(e) {
       flashMsg(wifiResetMsg, 'msg err', e.message, 5000);
@@ -1773,7 +1808,22 @@ router.get('/status', requireAdmin, (req, res) => {
   });
 });
 
-router.post('/wifi', requireAdmin, (req, res) => {
+// Restarting the device (reboot, WiFi change, OTA) mid-purchase could stop a
+// customer opening the door they just paid for. Unless the admin has
+// confirmed (force: true), answer 409 naming the order instead. Returns true
+// when it has responded.
+async function refuseIfOrderInProgress(req, res, device_id) {
+  if (req.body?.force === true) return false;
+  const order = (await getActiveOrderForDevice(device_id)) || (await getInProgressOrderForDevice(device_id));
+  if (!order) return false;
+  res.status(409).json({
+    error: 'A customer order is in progress',
+    order_in_progress: { id: order.id, status: order.status },
+  });
+  return true;
+}
+
+router.post('/wifi', requireAdmin, async (req, res) => {
   const { ssid, password } = req.body;
   if (!ssid || !password) return res.status(400).json({ error: 'ssid and password required' });
   if (ssid.includes('"') || password.includes('"'))
@@ -1781,6 +1831,7 @@ router.post('/wifi', requireAdmin, (req, res) => {
   const device_id = DEVICE_ID();
   if (!isDeviceOnline(device_id)) return res.status(503).json({ error: 'Device is offline' });
   try {
+    if (await refuseIfOrderInProgress(req, res, device_id)) return;
     publishWifiUpdate(device_id, ssid, password);
     res.json({ ok: true });
   } catch (err) {
@@ -1788,10 +1839,11 @@ router.post('/wifi', requireAdmin, (req, res) => {
   }
 });
 
-router.post('/wifi-reset', requireAdmin, (req, res) => {
+router.post('/wifi-reset', requireAdmin, async (req, res) => {
   const device_id = DEVICE_ID();
   if (!isDeviceOnline(device_id)) return res.status(503).json({ error: 'Device is offline' });
   try {
+    if (await refuseIfOrderInProgress(req, res, device_id)) return;
     publishWifiReset(device_id);
     res.json({ ok: true });
   } catch (err) {
@@ -2040,10 +2092,11 @@ router.post('/lock', requireAdmin, (req, res) => {
   }
 });
 
-router.post('/reboot', requireAdmin, (req, res) => {
+router.post('/reboot', requireAdmin, async (req, res) => {
   const device_id = DEVICE_ID();
   if (!isDeviceOnline(device_id)) return res.status(503).json({ error: 'Device is offline' });
   try {
+    if (await refuseIfOrderInProgress(req, res, device_id)) return;
     publishReboot(device_id);
     res.json({ ok: true });
   } catch (err) {
@@ -2090,11 +2143,12 @@ router.post('/refund/:order_id', requireAdmin, async (req, res) => {
   }
 });
 
-router.post('/ota', requireAdmin, (req, res) => {
+router.post('/ota', requireAdmin, async (req, res) => {
   const { url } = req.body;
   const device_id = DEVICE_ID();
   if (!url) return res.status(400).json({ error: 'url is required' });
   try {
+    if (await refuseIfOrderInProgress(req, res, device_id)) return;
     publishOTA(device_id, url);
     res.json({ ok: true });
   } catch (err) {

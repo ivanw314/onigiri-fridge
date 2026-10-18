@@ -133,6 +133,8 @@ Installable PWA, Bearer-token auth (`ADMIN_SECRET`), persistent login via localS
 - **Insights** — for the last 7 days, 30 days or all time: revenue, orders, items sold, average order, items per order, refund rate (paid orders later refunded, kept separate from checkouts that were never paid); busiest hours and days of the week (weekdays averaged per occurrence, counted from the first sale); top items with share of units sold and the pairs most often bought together; and a restock forecast — each active item's average daily sales over the last 14 days and roughly how many days its current stock will last
 - **Device** — WiFi SSID/signal/firmware version, WiFi credential update, OTA firmware update by URL, store time zone, color-coded activity log, and a **Danger zone** (Reboot, WiFi factory reset with double-confirm, Clear all orders)
 
+Anything that restarts the controller (Reboot, WiFi update or reset, OTA) marks it offline the moment it announces the restart, so the buy page and checkout close until it reconnects instead of taking payments it can't unlock for. Those actions also ask for confirmation if a customer order is in progress (pending, paid or dispensing).
+
 ### Environment variables
 
 See [`backend/.env.example`](backend/.env.example) for the full annotated list — server/database/HiveMQ/Square/admin secrets, plus `ITEM_NAME` / `ITEM_PRICE_CENTS` (legacy catalog-seed + fallback only) and the optional `STORE_NAME`.
