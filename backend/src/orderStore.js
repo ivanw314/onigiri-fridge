@@ -287,10 +287,24 @@ async function updateOrder(order_id, updates) {
   return order;
 }
 
-async function getRecentOrders(limit = 20) {
+// before: created_at cursor for paging (only orders older than it);
+// statuses: optional list to filter to.
+async function getRecentOrders({ limit = 20, before, statuses } = {}) {
+  const where  = [];
+  const params = [];
+  if (before) {
+    params.push(before);
+    where.push(`created_at < $${params.length}`);
+  }
+  if (statuses && statuses.length) {
+    params.push(statuses);
+    where.push(`status = ANY($${params.length}::text[])`);
+  }
+  params.push(limit);
   const { rows: orders } = await pool.query(
-    'SELECT * FROM orders ORDER BY created_at DESC LIMIT $1',
-    [limit]
+    `SELECT * FROM orders ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+     ORDER BY created_at DESC LIMIT $${params.length}`,
+    params
   );
   if (orders.length === 0) return [];
 
@@ -320,7 +334,7 @@ async function deleteAllOrders() {
 // server's (UTC by default, which rolled the day over at 5 PM Pacific).
 // AT TIME ZONE handles daylight saving.
 async function getOrderStats(timezone) {
-  const [{ rows: todayRows }, { rows: totalRows }] = await Promise.all([
+  const [{ rows: todayRows }, { rows: totalRows }, { rows: dayRows }, { rows: itemRows }] = await Promise.all([
     pool.query(
       `SELECT COALESCE(SUM(oi.quantity), 0) AS count,
               COALESCE(SUM(oi.quantity * oi.unit_price_cents), 0) AS revenue_cents
@@ -337,12 +351,199 @@ async function getOrderStats(timezone) {
        JOIN order_items oi ON oi.order_id = o.id
        WHERE o.status = 'complete'`
     ),
+    // Exactly 7 rows (today and the 6 days before), zero-filled. Each day's
+    // bounds are converted from store-local midnight separately, so a
+    // daylight-saving day is correctly 23 or 25 hours long.
+    pool.query(
+      `SELECT to_char(d.day, 'YYYY-MM-DD') AS day,
+              COALESCE(SUM(oi.quantity), 0) AS count,
+              COALESCE(SUM(oi.quantity * oi.unit_price_cents), 0) AS revenue_cents
+       FROM generate_series(
+              date_trunc('day', NOW() AT TIME ZONE $1) - INTERVAL '6 days',
+              date_trunc('day', NOW() AT TIME ZONE $1),
+              INTERVAL '1 day'
+            ) AS d(day)
+       LEFT JOIN orders o
+         ON o.status = 'complete'
+        AND o.created_at >= d.day AT TIME ZONE $1
+        AND o.created_at <  (d.day + INTERVAL '1 day') AT TIME ZONE $1
+       LEFT JOIN order_items oi ON oi.order_id = o.id
+       GROUP BY d.day
+       ORDER BY d.day`,
+      [timezone]
+    ),
+    pool.query(
+      `SELECT oi.item_name,
+              SUM(oi.quantity) AS quantity,
+              SUM(oi.quantity * oi.unit_price_cents) AS revenue_cents
+       FROM orders o
+       JOIN order_items oi ON oi.order_id = o.id
+       WHERE o.status = 'complete'
+         AND o.created_at >= date_trunc('day', NOW() AT TIME ZONE $1) AT TIME ZONE $1
+       GROUP BY oi.item_name
+       ORDER BY SUM(oi.quantity) DESC, SUM(oi.quantity * oi.unit_price_cents) DESC, oi.item_name`,
+      [timezone]
+    ),
   ]);
   return {
     todayCount:         parseInt(todayRows[0].count, 10),
     todayRevenueCents:  parseInt(todayRows[0].revenue_cents, 10),
     totalCount:         parseInt(totalRows[0].count, 10),
     totalRevenueCents:  parseInt(totalRows[0].revenue_cents, 10),
+    last7Days: dayRows.map((r) => ({
+      day:           r.day,
+      count:         parseInt(r.count, 10),
+      revenue_cents: parseInt(r.revenue_cents, 10),
+    })),
+    todayByItem: itemRows.map((r) => ({
+      item_name:     r.item_name,
+      quantity:      parseInt(r.quantity, 10),
+      revenue_cents: parseInt(r.revenue_cents, 10),
+    })),
+  };
+}
+
+// Analysis for the admin Insights tab over the last `days` store-local days
+// (including today), or all history when days is null. Like getOrderStats,
+// only completed orders count as sales and revenue is pre-tax.
+async function getInsights(timezone, days) {
+  // Every range query takes both parameters, with days NULL meaning no lower
+  // bound, so the all-time case runs the same SQL.
+  const today   = `date_trunc('day', NOW() AT TIME ZONE $1)`;
+  const params  = [timezone, days];
+  const start   = `${today} - INTERVAL '1 day' * ($2::int - 1)`;
+  const inRange = `AND ($2::int IS NULL OR o.created_at >= (${start}) AT TIME ZONE $1)`;
+  const sales   = `FROM orders o JOIN order_items oi ON oi.order_id = o.id WHERE o.status = 'complete' ${inRange}`;
+
+  const [statusQ, totalsQ, hourQ, dowQ, dayCountQ, itemQ, pairQ, forecastQ] = await Promise.all([
+    // timed_out covers both checkouts that were never paid (abandoned) and
+    // paid orders auto-refunded after an unlock timeout; the payment id is
+    // what tells them apart.
+    pool.query(
+      `SELECT COUNT(*) FILTER (WHERE o.status = 'refunded'
+                                  OR (o.status = 'timed_out' AND o.square_payment_id IS NOT NULL)) AS refunded,
+              COUNT(*) FILTER (WHERE o.status = 'timed_out' AND o.square_payment_id IS NULL) AS abandoned
+       FROM orders o WHERE true ${inRange}`,
+      params
+    ),
+    pool.query(
+      `SELECT COUNT(DISTINCT o.id) AS orders,
+              COALESCE(SUM(oi.quantity), 0) AS items,
+              COALESCE(SUM(oi.quantity * oi.unit_price_cents), 0) AS revenue_cents
+       ${sales}`,
+      params
+    ),
+    pool.query(
+      `SELECT EXTRACT(HOUR FROM o.created_at AT TIME ZONE $1)::int AS hour,
+              COUNT(DISTINCT o.id) AS orders, SUM(oi.quantity) AS items
+       ${sales} GROUP BY 1`,
+      params
+    ),
+    pool.query(
+      `SELECT EXTRACT(ISODOW FROM o.created_at AT TIME ZONE $1)::int AS dow,
+              COUNT(DISTINCT o.id) AS orders, SUM(oi.quantity) AS items
+       ${sales} GROUP BY 1`,
+      params
+    ),
+    // How many of each weekday the range covers, counted from the first sale
+    // when that's later, so averages aren't diluted by days before launch.
+    pool.query(
+      `SELECT EXTRACT(ISODOW FROM d)::int AS dow, COUNT(*) AS days
+       FROM (SELECT date_trunc('day', MIN(created_at) AT TIME ZONE $1) AS first_day
+             FROM orders WHERE status = 'complete') f,
+            generate_series(CASE WHEN $2::int IS NULL THEN f.first_day ELSE GREATEST(${start}, f.first_day) END,
+                            ${today}, INTERVAL '1 day') AS d
+       GROUP BY 1`,
+      params
+    ),
+    pool.query(
+      `SELECT oi.item_name, SUM(oi.quantity) AS quantity,
+              SUM(oi.quantity * oi.unit_price_cents) AS revenue_cents, COUNT(DISTINCT o.id) AS orders
+       ${sales}
+       GROUP BY oi.item_name
+       ORDER BY SUM(oi.quantity) DESC, SUM(oi.quantity * oi.unit_price_cents) DESC, oi.item_name`,
+      params
+    ),
+    pool.query(
+      `SELECT a.item_name AS a, b.item_name AS b, COUNT(DISTINCT o.id) AS orders
+       FROM orders o
+       JOIN order_items a ON a.order_id = o.id
+       JOIN order_items b ON b.order_id = o.id AND a.item_name < b.item_name
+       WHERE o.status = 'complete' ${inRange}
+       GROUP BY 1, 2
+       ORDER BY 3 DESC, 1, 2
+       LIMIT 3`,
+      params
+    ),
+    // The forecast always uses recent sales (the last 14 days, or since the
+    // first sale if that's sooner), whatever range is picked.
+    pool.query(
+      `SELECT i.id, i.name, i.stock, COALESCE(s.sold, 0) AS sold,
+              LEAST(14, (${today})::date - (SELECT date_trunc('day', MIN(created_at) AT TIME ZONE $1)::date
+                                            FROM orders WHERE status = 'complete') + 1) AS window_days
+       FROM items i
+       LEFT JOIN (
+         SELECT oi.item_id, SUM(oi.quantity) AS sold
+         FROM orders o JOIN order_items oi ON oi.order_id = o.id
+         WHERE o.status = 'complete' AND o.created_at >= (${today} - INTERVAL '13 days') AT TIME ZONE $1
+         GROUP BY oi.item_id
+       ) s ON s.item_id = i.id
+       WHERE i.active
+       ORDER BY i.name`,
+      [timezone]
+    ),
+  ]);
+
+  const n = (v) => parseInt(v, 10) || 0;
+  const orders   = n(totalsQ.rows[0].orders);
+  const items    = n(totalsQ.rows[0].items);
+  const revenue  = n(totalsQ.rows[0].revenue_cents);
+  const refunded = n(statusQ.rows[0].refunded);
+
+  const weekdayDays = {};
+  let daysCounted = 0;
+  for (const r of dayCountQ.rows) {
+    weekdayDays[r.dow] = n(r.days);
+    daysCounted += n(r.days);
+  }
+  const byHour = Array.from({ length: 24 }, (_, hour) => ({ hour, orders: 0, items: 0 }));
+  for (const r of hourQ.rows) byHour[r.hour] = { hour: r.hour, orders: n(r.orders), items: n(r.items) };
+  const byWeekday = [1, 2, 3, 4, 5, 6, 7].map((dow) => {
+    const r = dowQ.rows.find((x) => x.dow === dow);
+    return { dow, orders: r ? n(r.orders) : 0, items: r ? n(r.items) : 0, days: weekdayDays[dow] || 0 };
+  });
+
+  const windowDays = (forecastQ.rows[0] && n(forecastQ.rows[0].window_days)) || 14;
+
+  return {
+    range: { days, days_counted: daysCounted },
+    summary: {
+      orders,
+      items,
+      revenue_cents:   revenue,
+      avg_order_cents: orders ? Math.round(revenue / orders) : 0,
+      items_per_order: orders ? items / orders : 0,
+      refunded,
+      refund_rate:     orders + refunded ? refunded / (orders + refunded) : 0,
+      abandoned:       n(statusQ.rows[0].abandoned),
+    },
+    byHour,
+    byWeekday,
+    topItems: itemQ.rows.map((r) => ({
+      item_name:     r.item_name,
+      quantity:      n(r.quantity),
+      revenue_cents: n(r.revenue_cents),
+      orders:        n(r.orders),
+    })),
+    pairs: pairQ.rows.map((r) => ({ a: r.a, b: r.b, orders: n(r.orders) })),
+    forecast: {
+      window_days: windowDays,
+      items: forecastQ.rows.map((r) => {
+        const sold   = n(r.sold);
+        const perDay = sold / windowDays;
+        return { id: r.id, name: r.name, stock: r.stock, sold, per_day: perDay, days_left: perDay > 0 ? r.stock / perDay : null };
+      }),
+    },
   };
 }
 
@@ -395,6 +596,7 @@ module.exports = {
   updateOrder,
   getRecentOrders,
   getOrderStats,
+  getInsights,
   deleteOrder,
   deleteAllOrders,
   isDuplicateEvent,

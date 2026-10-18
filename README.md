@@ -125,17 +125,13 @@ The product catalog lives in Postgres (`items` table: `name`, `price_cents`, `st
 
 ### Admin panel (`/admin`)
 
-Installable PWA, Bearer-token auth (`ADMIN_SECRET`), persistent login via localStorage.
+Installable PWA, Bearer-token auth (`ADMIN_SECRET`), persistent login via localStorage. A slim header shows online/offline and last-seen on every screen; a bottom tab bar switches between five tabs (the URL hash tracks the tab, and the app reopens on the last one used). Only the visible tab polls, and polling pauses while the app is in the background.
 
-- **Status** — online/offline, last-seen, WiFi SSID/signal/firmware version, manual refresh
-- **Sales** — today's / all-time items sold and revenue (computed from each order's snapshotted price)
-- **Controls** — Unlock, Lock, Reboot
-- **Categories** — add, rename, reorder (↑/↓), delete the buy page's sections
-- **Items** — catalog CRUD grouped by category, stock editing, category picker, add/delete
-- **WiFi Settings** — remote credential update, factory reset (double-confirm)
-- **Firmware Update** — OTA trigger by URL
-- **Recent Orders** — item, status, quantity, timestamp; refund / delete per row, clear all
-- **Activity** — color-coded recent device events, auto-refreshing
+- **Home** — today's revenue and items sold, a 7-day revenue bar chart (tap/hover a day for its numbers), today's sales per item, all-time totals (all computed from each order's snapshotted price, in the store time zone); Unlock / Lock; a "Needs restock" list of low (≤ 3) and out-of-stock items that jumps to the item; the 5 latest orders
+- **Items** — catalog grouped by category; each row has a −/+ stock stepper (taps are batched and sent as a relative change, so a sale in the meantime isn't overwritten) and an Edit form for name / category / price / full recount / delete; inactive items can be restored or deleted permanently. Below it, **Categories** — add, rename, reorder (↑/↓), delete the buy page's sections. Open edit forms survive the periodic refresh.
+- **Orders** — filter by All / Completed / In progress / Refunded / timed out, paged with Load more; each card shows status, the charged total, items and time, and expands to line items, tax, IDs, timestamps, and Refund / Delete
+- **Insights** — for the last 7 days, 30 days or all time: revenue, orders, items sold, average order, items per order, refund rate (paid orders later refunded, kept separate from checkouts that were never paid); busiest hours and days of the week (weekdays averaged per occurrence, counted from the first sale); top items with share of units sold and the pairs most often bought together; and a restock forecast — each active item's average daily sales over the last 14 days and roughly how many days its current stock will last
+- **Device** — WiFi SSID/signal/firmware version, WiFi credential update, OTA firmware update by URL, store time zone, color-coded activity log, and a **Danger zone** (Reboot, WiFi factory reset with double-confirm, Clear all orders)
 
 ### Environment variables
 

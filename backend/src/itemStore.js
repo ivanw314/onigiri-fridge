@@ -122,6 +122,18 @@ async function restoreStock(id, qty) {
   return rows[0] ?? null;
 }
 
+// Admin restock: a relative change rather than setting an absolute count, so
+// a sale that lands between the admin loading the page and tapping +/- isn't
+// overwritten. Clamped at zero. Returns null if the item doesn't exist.
+async function adjustStock(id, delta) {
+  if (!isUuid(id)) return null;
+  const { rows } = await pool.query(
+    `UPDATE items SET stock = GREATEST(stock + $2, 0), updated_at = NOW() WHERE id = $1 RETURNING *`,
+    [id, delta]
+  );
+  return rows[0] ?? null;
+}
+
 // items: [{ item_id, quantity }, ...] — a cart can span several distinct
 // items, so stock for the whole order must be decremented as one atomic
 // transaction: either every line has enough stock, or none of it is taken.
@@ -231,6 +243,7 @@ module.exports = {
   updateItem,
   deleteItem,
   itemHasOrders,
+  adjustStock,
   decrementStockForItems,
   restoreStockForItems,
   getCategories,
