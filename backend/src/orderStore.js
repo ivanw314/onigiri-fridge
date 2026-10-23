@@ -419,7 +419,23 @@ async function getOrderStats(timezone) {
 // Analysis for the admin Insights tab over the last `days` store-local days
 // (including today), or all history when days is null. Like getOrderStats,
 // only completed orders count as sales and revenue is pre-tax.
-async function getInsights(timezone, days) {
+// How many calendar days from today it takes to get through openDays of
+// trading, stepping over closed weekdays (ISO numbers).
+function calendarDaysFor(openDays, todayDow, closedDays) {
+  if (!closedDays.length) return openDays;
+  let left = openDays;
+  let days = 0;
+  for (let dow = todayDow; days < 60; dow = (dow % 7) + 1, days++) {
+    if (closedDays.includes(dow)) continue;
+    if (left <= 1) return days + left;
+    left -= 1;
+  }
+  return days + left;   // far enough out that the exact figure doesn't matter
+}
+
+// closedDays: ISO weekdays the fridge isn't in use. They aren't counted as
+// days in any average, though a sale made on one still counts in the totals.
+async function getInsights(timezone, days, closedDays = []) {
   // Every range query takes both parameters, with days NULL meaning no lower
   // bound, so the all-time case runs the same SQL.
   const today   = `date_trunc('day', NOW() AT TIME ZONE $1)`;
@@ -428,7 +444,10 @@ async function getInsights(timezone, days) {
   const inRange = `AND ($2::int IS NULL OR o.created_at >= (${start}) AT TIME ZONE $1)`;
   const sales   = `FROM orders o JOIN order_items oi ON oi.order_id = o.id WHERE o.status = 'complete' ${inRange}`;
 
-  const [statusQ, totalsQ, hourQ, dowQ, dayCountQ, itemQ, pairQ, forecastQ] = await Promise.all([
+  const [
+    statusQ, totalsQ, hourQ, dowQ, dayCountQ, itemQ, pairQ, forecastQ, windowQ,
+    prevTotalsQ, prevDaysQ, selloutQ, trackedQ,
+  ] = await Promise.all([
     // timed_out covers both checkouts that were never paid (abandoned) and
     // paid orders auto-refunded after an unlock timeout; the payment id is
     // what tells them apart.
@@ -460,14 +479,16 @@ async function getInsights(timezone, days) {
     ),
     // How many of each weekday the range covers, counted from the first sale
     // when that's later, so averages aren't diluted by days before launch.
+    // Closed weekdays aren't counted at all.
     pool.query(
       `SELECT EXTRACT(ISODOW FROM d)::int AS dow, COUNT(*) AS days
        FROM (SELECT date_trunc('day', MIN(created_at) AT TIME ZONE $1) AS first_day
              FROM orders WHERE status = 'complete') f,
             generate_series(CASE WHEN $2::int IS NULL THEN f.first_day ELSE GREATEST(${start}, f.first_day) END,
                             ${today}, INTERVAL '1 day') AS d
+       WHERE EXTRACT(ISODOW FROM d)::int <> ALL($3::int[])
        GROUP BY 1`,
-      params
+      [...params, closedDays]
     ),
     pool.query(
       `SELECT oi.item_name, SUM(oi.quantity) AS quantity,
@@ -491,9 +512,7 @@ async function getInsights(timezone, days) {
     // The forecast always uses recent sales (the last 14 days, or since the
     // first sale if that's sooner), whatever range is picked.
     pool.query(
-      `SELECT i.id, i.name, i.stock, COALESCE(s.sold, 0) AS sold,
-              LEAST(14, (${today})::date - (SELECT date_trunc('day', MIN(created_at) AT TIME ZONE $1)::date
-                                            FROM orders WHERE status = 'complete') + 1) AS window_days
+      `SELECT i.id, i.name, i.stock, COALESCE(s.sold, 0) AS sold
        FROM items i
        LEFT JOIN (
          SELECT oi.item_id, SUM(oi.quantity) AS sold
@@ -504,6 +523,79 @@ async function getInsights(timezone, days) {
        WHERE i.active
        ORDER BY i.name`,
       [timezone]
+    ),
+    // That window's length, how many of its days were open, and today's
+    // weekday for turning open days of stock back into calendar days.
+    pool.query(
+      `SELECT COUNT(*) AS days,
+              COUNT(*) FILTER (WHERE EXTRACT(ISODOW FROM d)::int <> ALL($2::int[])) AS open_days,
+              EXTRACT(ISODOW FROM ${today})::int AS today_dow
+       FROM (SELECT date_trunc('day', MIN(created_at) AT TIME ZONE $1) AS first_day
+             FROM orders WHERE status = 'complete') f,
+            generate_series(GREATEST(${today} - INTERVAL '13 days', f.first_day), ${today}, INTERVAL '1 day') AS d`,
+      [timezone, closedDays]
+    ),
+    // The same number of days just before the range, cut off at the same
+    // time of day, to compare against. Not for all time.
+    days === null ? null : pool.query(
+      `SELECT COUNT(DISTINCT o.id) AS orders,
+              COALESCE(SUM(oi.quantity), 0) AS items,
+              COALESCE(SUM(oi.quantity * oi.unit_price_cents), 0) AS revenue_cents
+       FROM orders o JOIN order_items oi ON oi.order_id = o.id
+       WHERE o.status = 'complete'
+         AND o.created_at >= (${start} - INTERVAL '1 day' * $2::int) AT TIME ZONE $1
+         AND o.created_at <  NOW() - INTERVAL '1 day' * $2::int`,
+      params
+    ),
+    // Its open days, and whether sales had started by then. A comparison
+    // against a stretch from before launch would mean nothing.
+    days === null ? null : pool.query(
+      `SELECT COUNT(*) FILTER (WHERE EXTRACT(ISODOW FROM d)::int <> ALL($3::int[])) AS open_days,
+              MIN(f.first_day) <= MIN(d) AS covered
+       FROM (SELECT date_trunc('day', MIN(created_at) AT TIME ZONE $1) AS first_day
+             FROM orders WHERE status = 'complete') f,
+            generate_series(${start} - INTERVAL '1 day' * $2::int, ${today} - INTERVAL '1 day' * $2::int,
+                            INTERVAL '1 day') AS d`,
+      [...params, closedDays]
+    ),
+    // Each open day in the range an item sold out, or spent entirely sold out
+    // (a sell-out that carried over from an earlier day without a restock
+    // before it started), and its median sell-out time.
+    pool.query(
+      `WITH out_days AS (
+         SELECT s.item_id, s.item_name, s.started_at, d,
+                d = date_trunc('day', s.started_at AT TIME ZONE $1) AS sold_out_that_day
+         FROM sellouts s,
+              generate_series(date_trunc('day', s.started_at AT TIME ZONE $1),
+                              date_trunc('day', COALESCE(s.ended_at, NOW()) AT TIME ZONE $1), INTERVAL '1 day') AS d
+         WHERE ($2::int IS NULL OR d >= ${start})
+           AND EXTRACT(ISODOW FROM d)::int <> ALL($3::int[])
+           AND (d = date_trunc('day', s.started_at AT TIME ZONE $1)
+                OR COALESCE(s.ended_at, NOW()) AT TIME ZONE $1 >= LEAST(d + INTERVAL '1 day', NOW() AT TIME ZONE $1))
+       )
+       SELECT COALESCE(i.name, MAX(o.item_name)) AS item_name,
+              COUNT(DISTINCT o.d) FILTER (WHERE o.sold_out_that_day) AS days_sold_out,
+              COUNT(DISTINCT o.d) FILTER (WHERE NOT o.sold_out_that_day) AS days_out_all_day,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY (EXTRACT(EPOCH FROM (o.started_at AT TIME ZONE $1)::time) / 60)::float8)
+                FILTER (WHERE o.sold_out_that_day) AS usual_minute
+       FROM out_days o LEFT JOIN items i ON i.id = o.item_id
+       GROUP BY o.item_id, i.name
+       ORDER BY COUNT(DISTINCT o.d) DESC, 1`,
+      [...params, closedDays]
+    ),
+    // The open days in the range that sell-outs were tracked for: tracking
+    // started with this feature, so older ranges are only partly covered.
+    // ${start} is NULL for all time, which GREATEST and COALESCE skip.
+    pool.query(
+      `SELECT COUNT(*) FILTER (WHERE EXTRACT(ISODOW FROM d)::int <> ALL($3::int[])) AS open_days,
+              to_char(MIN(t.since_day), 'YYYY-MM-DD') AS since,
+              MIN(t.since_day) > COALESCE(${start}, MIN(f.first_day)) AS partial
+       FROM (SELECT date_trunc('day', value::timestamptz AT TIME ZONE $1) AS since_day
+             FROM settings WHERE key = 'sellouts_since') t,
+            (SELECT date_trunc('day', MIN(created_at) AT TIME ZONE $1) AS first_day
+             FROM orders WHERE status = 'complete') f,
+            generate_series(GREATEST(t.since_day, f.first_day, ${start}), ${today}, INTERVAL '1 day') AS d`,
+      [...params, closedDays]
     ),
   ]);
 
@@ -526,10 +618,13 @@ async function getInsights(timezone, days) {
     return { dow, orders: r ? n(r.orders) : 0, items: r ? n(r.items) : 0, days: weekdayDays[dow] || 0 };
   });
 
-  const windowDays = (forecastQ.rows[0] && n(forecastQ.rows[0].window_days)) || 14;
+  const windowDays = n(windowQ.rows[0].days) || 14;
+  const openDays   = n(windowQ.rows[0].open_days);
+  const todayDow   = n(windowQ.rows[0].today_dow);
+  const tracked    = trackedQ.rows[0];
 
   return {
-    range: { days, days_counted: daysCounted },
+    range: { days, days_counted: daysCounted, closed_days: closedDays },
     summary: {
       orders,
       items,
@@ -540,6 +635,14 @@ async function getInsights(timezone, days) {
       refund_rate:     orders + refunded ? refunded / (orders + refunded) : 0,
       abandoned:       n(statusQ.rows[0].abandoned),
     },
+    // The same totals for the stretch before the range, or null when there's
+    // nothing to compare (all time, or sales hadn't started yet).
+    previous: prevDaysQ && prevDaysQ.rows[0].covered ? {
+      orders:        n(prevTotalsQ.rows[0].orders),
+      items:         n(prevTotalsQ.rows[0].items),
+      revenue_cents: n(prevTotalsQ.rows[0].revenue_cents),
+      open_days:     n(prevDaysQ.rows[0].open_days),
+    } : null,
     byHour,
     byWeekday,
     topItems: itemQ.rows.map((r) => ({
@@ -549,12 +652,33 @@ async function getInsights(timezone, days) {
       orders:        n(r.orders),
     })),
     pairs: pairQ.rows.map((r) => ({ a: r.a, b: r.b, orders: n(r.orders) })),
+    // usual_minute: median minutes after midnight it sold out, null when it
+    // only carried over from earlier days.
+    sellouts: {
+      open_days:     n(tracked.open_days),
+      tracked_since: tracked.since,
+      partial:       Boolean(tracked.partial),
+      items: selloutQ.rows.map((r) => ({
+        item_name:        r.item_name,
+        days_sold_out:    n(r.days_sold_out),
+        days_out_all_day: n(r.days_out_all_day),
+        usual_minute:     r.usual_minute === null ? null : Math.round(r.usual_minute),
+      })),
+    },
+    // per_day is per open day. days_left counts calendar days, so a closed
+    // weekend in between pushes it out; open_days_left doesn't.
     forecast: {
       window_days: windowDays,
+      open_days:   openDays,
       items: forecastQ.rows.map((r) => {
-        const sold   = n(r.sold);
-        const perDay = sold / windowDays;
-        return { id: r.id, name: r.name, stock: r.stock, sold, per_day: perDay, days_left: perDay > 0 ? r.stock / perDay : null };
+        const sold     = n(r.sold);
+        const perDay   = sold / Math.max(openDays, 1);
+        const openLeft = perDay > 0 ? r.stock / perDay : null;
+        return {
+          id: r.id, name: r.name, stock: r.stock, sold, per_day: perDay,
+          open_days_left: openLeft,
+          days_left:      openLeft === null ? null : calendarDaysFor(openLeft, todayDow, closedDays),
+        };
       }),
     },
   };

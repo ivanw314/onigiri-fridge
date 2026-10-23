@@ -15,6 +15,7 @@ const {
 } = require('../itemStore');
 const { createRefund } = require('../square');
 const { US_TIMEZONES, getSettings, setSetting } = require('../settingsStore');
+const { setLocation, getWeatherInsights } = require('../weather');
 
 const DEVICE_ID = () => process.env.DEVICE_ID || 'onigiri';
 
@@ -208,7 +209,11 @@ router.get('/', (req, res) => {
     /* Insights */
     .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.1rem 0.75rem; }
     .tile-num { font-size: 1.2rem; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-    #insAbandoned:not(:empty) { margin: 1rem 0 0; }
+    .tile-delta { font-size: 0.72rem; font-weight: 600; color: #999; margin-top: 0.2rem; font-variant-numeric: tabular-nums; }
+    .tile-delta.up   { color: #1a7a1a; }
+    .tile-delta.down { color: #c00; }
+    .ins-notes:not(:empty) { display: flex; flex-direction: column; gap: 0.25rem; margin-top: 1rem; }
+    .ins-notes .hint { margin: 0; }
     .chart-heading { margin-top: 1.5rem; }
     .top-list { list-style: none; display: flex; flex-direction: column; gap: 0.8rem; font-size: 0.88rem; }
     .top-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.75rem; }
@@ -225,6 +230,21 @@ router.get('/', (req, res) => {
     .fc-eta.low   { color: #b45309; }
     .fc-eta.oos   { color: #c00; }
     .fc-eta.muted { color: #999; font-weight: 500; }
+    .wx-list { list-style: none; display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.88rem; }
+    .wx-list li { display: flex; justify-content: space-between; gap: 1rem; }
+    .wx-verdict { font-weight: 600; font-size: 0.9rem; margin-top: 0.75rem; }
+    .wx-strip { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0.3rem; margin-bottom: 0.6rem; }
+    .wx-day { display: flex; flex-direction: column; align-items: center; gap: 0.05rem; padding: 0.45rem 0; border-radius: 10px; background: #f6f6f1; font-size: 0.72rem; }
+    .wx-day.closed { opacity: 0.45; }
+    .wx-day b    { font-size: 0.72rem; color: #555; }
+    .wx-icon     { font-size: 1.3rem; line-height: 1.35; }
+    .wx-temp     { font-weight: 700; font-size: 0.88rem; }
+    .wx-rain     { font-weight: 600; color: #1a5cbf; }
+    .wx-rain.dry { font-weight: 500; color: #aaa; }
+    #wxNote:empty { display: none; }
+    .wx-place  { font-weight: 600; font-size: 0.9rem; margin-bottom: 0.75rem; }
+    .wx-coords { display: flex; gap: 0.4rem; margin-top: 0.6rem; }
+    .wx-coords input { flex: 1; min-width: 0; margin: 0; }
 
     /* Orders */
     .chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.5rem; }
@@ -440,7 +460,7 @@ router.get('/', (req, res) => {
       <div class="card">
         <h2>Summary</h2>
         <div class="tiles" id="insSummary"></div>
-        <p class="hint" id="insAbandoned"></p>
+        <div class="ins-notes" id="insNotes"></div>
       </div>
 
       <div class="card">
@@ -454,6 +474,17 @@ router.get('/', (req, res) => {
       </div>
 
       <div class="card">
+        <h2>Weather</h2>
+        <p class="hint" id="wxHint"></p>
+        <div id="wxRain"></div>
+        <div id="wxTempBox" hidden>
+          <h3 class="item-group-heading chart-heading">Daily high</h3>
+          <p class="week-readout" id="wxTempReadout"></p>
+          <div class="week" id="wxTempChart"></div>
+        </div>
+      </div>
+
+      <div class="card">
         <h2>Top items</h2>
         <ol class="top-list" id="topItems"><li class="empty">Loading&#x2026;</li></ol>
         <div id="pairsBox" hidden>
@@ -463,9 +494,36 @@ router.get('/', (req, res) => {
       </div>
 
       <div class="card">
+        <h2>Sell-outs</h2>
+        <p class="hint" id="selloutHint"></p>
+        <div id="sellouts"><p class="empty">Loading&#x2026;</p></div>
+      </div>
+
+      <div class="card">
         <h2>Restock forecast</h2>
         <p class="hint" id="forecastHint"></p>
+        <div class="wx-strip" id="wxStrip" hidden></div>
+        <p class="hint" id="wxNote"></p>
         <div id="forecast"><p class="empty">Loading&#x2026;</p></div>
+      </div>
+
+      <div class="card">
+        <h2>Open days</h2>
+        <p class="status-sub" style="margin:-0.5rem 0 1rem">Days the fridge is in use. Closed days don&rsquo;t count toward daily averages or the restock forecast, and are left off the day-of-week chart. A sale made on one still counts in the totals.</p>
+        <div class="chips" id="openDayChips" role="group" aria-label="Open days"></div>
+        <p class="msg" id="openDaysMsg"></p>
+      </div>
+
+      <div class="card">
+        <h2>Weather location</h2>
+        <p class="status-sub" style="margin:-0.5rem 0 1rem">Where the fridge is, for weather from the National Weather Service (US only). Each finished day&rsquo;s weather is recorded from the nearest airport station.</p>
+        <p class="wx-place" id="wxPlace">Not set</p>
+        <button class="secondary" id="wxHereBtn">&#x1F4CD; Use this phone&rsquo;s location</button>
+        <div class="wx-coords">
+          <input type="text" id="wxCoords" placeholder="Or paste: 47.6062, -122.3321" autocomplete="off">
+          <button class="sm-btn primary" id="wxSaveBtn">Save</button>
+        </div>
+        <p class="msg" id="wxMsg"></p>
       </div>
     </section>
 
@@ -868,11 +926,16 @@ router.get('/', (req, res) => {
     var req = ++insightsReq;
     api('GET', '/admin/insights?range=' + insightsRange).then(function(ins) {
       if (req !== insightsReq) return;
-      renderSummary(ins.summary);
+      var closed = ins.range.closed_days;
+      renderSummary(ins.summary, ins.previous, ins.range, closed);
       renderHours(ins.byHour, ins.range.days_counted);
-      renderWeekdays(ins.byWeekday);
+      renderWeekdays(ins.byWeekday, closed);
       renderTopItems(ins.topItems, ins.summary.items, ins.pairs);
+      renderSellouts(ins.sellouts, closed);
+      renderWeather(ins.weather, closed);
       renderForecast(ins.forecast);
+      renderWeatherStrip(ins.weather, closed);
+      if (!savingDays) { closedDays = closed; renderOpenDays(); }
     }).catch(function() {});
   }
 
@@ -882,20 +945,41 @@ router.get('/', (req, res) => {
   function hourSpan(h) { return hour12(h) + '–' + hour12(h + 1); }
   function hourTick(h) { return (h % 12 || 12) + (h < 12 ? 'a' : 'p'); }
 
-  function renderSummary(s) {
-    function tile(value, label) {
-      return '<div class="tile"><div class="tile-num">' + value + '</div><div class="stat-label">' + label + '</div></div>';
+  // p: the same totals for the stretch just before the range, or null.
+  // Revenue, orders and items compare per open day, so a range that happens
+  // to hold an extra closed day isn't marked down for it. The per-order
+  // figures compare as they are.
+  function renderSummary(s, p, range, closed) {
+    var days = range.days_counted;   // open days in the range, from the first sale
+    function perDay(v, d) { return d ? v / d : 0; }
+    function delta(cur, prev) {
+      if (!prev) return '';
+      var pct = Math.round((cur / prev - 1) * 100);
+      return '<div class="tile-delta' + (pct > 0 ? ' up' : pct < 0 ? ' down' : '') + '">' +
+        (pct > 0 ? '▲ ' : pct < 0 ? '▼ ' : '') + Math.abs(pct) + '%</div>';
+    }
+    function tile(value, label, change) {
+      return '<div class="tile"><div class="tile-num">' + value + '</div><div class="stat-label">' + label + '</div>' + (change || '') + '</div>';
     }
     document.getElementById('insSummary').innerHTML =
-      tile(money(s.revenue_cents), 'Revenue') +
-      tile(s.orders, 'Orders') +
-      tile(s.items, 'Items sold') +
-      tile(s.orders ? money(s.avg_order_cents) : '—', 'Avg order') +
-      tile(s.orders ? s.items_per_order.toFixed(1) : '—', 'Items / order') +
+      tile(money(s.revenue_cents), 'Revenue', p && delta(perDay(s.revenue_cents, days), perDay(p.revenue_cents, p.open_days))) +
+      tile(s.orders, 'Orders', p && delta(perDay(s.orders, days), perDay(p.orders, p.open_days))) +
+      tile(s.items, 'Items sold', p && delta(perDay(s.items, days), perDay(p.items, p.open_days))) +
+      tile(s.orders ? money(s.avg_order_cents) : '—', 'Avg order',
+        p && s.orders && p.orders && delta(s.avg_order_cents, p.revenue_cents / p.orders)) +
+      tile(s.orders ? s.items_per_order.toFixed(1) : '—', 'Items / order',
+        p && s.orders && p.orders && delta(s.items_per_order, p.items / p.orders)) +
       tile(s.orders || s.refunded ? Math.round(s.refund_rate * 100) + '%' : '—', 'Refunded (' + s.refunded + ')');
-    document.getElementById('insAbandoned').textContent = s.abandoned
-      ? plural(s.abandoned, 'checkout') + ' started but never paid.'
-      : '';
+
+    var notes = [];
+    if (days && s.orders) {
+      notes.push('Averages ' + money(s.revenue_cents / days) + ' and ' + (s.orders / days).toFixed(1) + ' orders a day across ' +
+        plural(days, closed.length ? 'open day' : 'day') + '.');
+    }
+    if (p) notes.push('Arrows compare with the previous ' + plural(range.days, 'day') + (closed.length ? ', per open day' : '') + '.');
+    else if (range.days) notes.push('A comparison with the previous ' + plural(range.days, 'day') + ' shows once sales go back that far.');
+    if (s.abandoned) notes.push(plural(s.abandoned, 'checkout') + ' started but never paid.');
+    document.getElementById('insNotes').innerHTML = notes.map(function(t) { return '<p class="hint">' + t + '</p>'; }).join('');
   }
 
   // Bars cover just the hours that had sales (at least 6 wide), so a fridge
@@ -923,8 +1007,9 @@ router.get('/', (req, res) => {
   }
 
   // Averaged per occurrence of each weekday, since a 30-day range has more
-  // of some weekdays than others.
-  function renderWeekdays(rows) {
+  // of some weekdays than others. Closed weekdays are left off.
+  function renderWeekdays(rows, closed) {
+    rows = rows.filter(function(d) { return closed.indexOf(d.dow) === -1; });
     var avg  = rows.map(function(d) { return d.days ? d.orders / d.days : 0; });
     var peak = avg.reduce(function(p, v, i) { return v > avg[p] ? i : p; }, 0);
     if (!avg[peak]) { dowChart.render([], 'No sales in this range yet.'); return; }
@@ -932,10 +1017,10 @@ router.get('/', (req, res) => {
       return {
         value:   avg[i],
         strong:  i === peak,
-        label:   DOW_SHORT[i],
-        readout: DOW_PLURAL[i] + ': ' + avg[i].toFixed(1) + ' orders on average (' + d.orders + ' total)',
+        label:   DOW_SHORT[d.dow - 1],
+        readout: DOW_PLURAL[d.dow - 1] + ': ' + avg[i].toFixed(1) + ' orders on average (' + d.orders + ' total)',
       };
-    }), 'Busiest: ' + DOW_PLURAL[peak] + ', ' + avg[peak].toFixed(1) + ' orders on average');
+    }), 'Busiest: ' + DOW_PLURAL[rows[peak].dow - 1] + ', ' + avg[peak].toFixed(1) + ' orders on average');
   }
 
   function renderTopItems(rows, totalItems, pairs) {
@@ -957,9 +1042,40 @@ router.get('/', (req, res) => {
     }).join('');
   }
 
+  function clockTime(minute) {
+    var h = Math.floor(minute / 60) % 24;
+    var m = minute % 60;
+    return (h % 12 || 12) + ':' + (m < 10 ? '0' : '') + m + (h < 12 ? ' AM' : ' PM');
+  }
+
+  // Days counts both days an item sold out and days it spent sold out from
+  // open to close, having never been restocked.
+  function renderSellouts(so, closed) {
+    var dayWord = closed.length ? 'open day' : 'day';
+    var since   = so.tracked_since && dayDate(so.tracked_since).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    document.getElementById('selloutHint').textContent = !so.open_days ? ''
+      : so.partial ? 'Out of ' + plural(so.open_days, dayWord) + ' since tracking started on ' + since + '.'
+      : 'Out of ' + plural(so.open_days, dayWord) + ' in this range.';
+    document.getElementById('sellouts').innerHTML = so.items.length ? so.items.map(function(it) {
+      var detail = [];
+      if (it.usual_minute !== null) {
+        detail.push(it.days_sold_out === 1
+          ? 'Ran out at ' + clockTime(it.usual_minute)
+          : 'Usually ran out around ' + clockTime(Math.round(it.usual_minute / 15) * 15));
+      }
+      if (it.days_out_all_day) detail.push((detail.length ? 'out' : 'Out') + ' all day on ' + plural(it.days_out_all_day, 'day'));
+      return '<div class="fc-row">' +
+        '<div><div class="fc-name">' + escapeAttr(it.item_name) + '</div><div class="item-price">' + detail.join(' · ') + '</div></div>' +
+        '<span class="fc-eta low">' + plural(it.days_sold_out + it.days_out_all_day, 'day') + '</span>' +
+      '</div>';
+    }).join('') : '<p class="empty">Nothing sold out in this range.</p>';
+  }
+
   function renderForecast(f) {
+    var someClosed = f.open_days < f.window_days;
     document.getElementById('forecastHint').textContent =
-      'Based on sales over the last ' + plural(f.window_days, 'day') + ', whatever range is picked above.';
+      'Based on sales over the last ' + plural(f.window_days, 'day') + (someClosed ? ' (' + f.open_days + ' open)' : '') +
+      ', whatever range is picked above.';
     // Soonest to run out first; items with no recent sales last.
     var rows = f.items.slice().sort(function(a, b) {
       var da = a.stock <= 0 ? -1 : a.days_left === null ? Infinity : a.days_left;
@@ -975,15 +1091,202 @@ router.get('/', (req, res) => {
       else {
         var d = Math.round(it.days_left);
         eta = '~' + plural(d, 'day');
-        if (it.days_left <= 2) cls = ' low';
+        // Urgency goes by trading days, so stock that won't see Monday out
+        // is still flagged on a Friday before a closed weekend.
+        if (it.open_days_left <= 2) cls = ' low';
       }
       return '<div class="fc-row">' +
         '<div><div class="fc-name">' + escapeAttr(it.name) + '</div>' +
-        '<div class="item-price">' + it.stock + ' left' + (it.sold ? ' · ' + it.per_day.toFixed(1) + ' sold a day' : '') + '</div></div>' +
+        '<div class="item-price">' + it.stock + ' left' +
+          (it.sold ? ' · ' + it.per_day.toFixed(1) + (someClosed ? ' sold per open day' : ' sold a day') : '') + '</div></div>' +
         '<span class="fc-eta' + cls + '">' + eta + '</span>' +
       '</div>';
     }).join('') : '<p class="empty">No active items.</p>';
   }
+
+  // ── Open days ───────────────────────────────────────────────────────────────
+  // Saved as soon as a day is tapped. The chips follow each Insights refresh,
+  // except while a save is in flight.
+
+  var closedDays   = [];      // ISO weekdays, 1 = Mon … 7 = Sun
+  var savingDays   = false;
+  var openDayChips = document.getElementById('openDayChips');
+  var openDaysMsg  = document.getElementById('openDaysMsg');
+
+  function renderOpenDays() {
+    openDayChips.innerHTML = DOW_SHORT.map(function(name, i) {
+      var open = closedDays.indexOf(i + 1) === -1;
+      return '<button class="chip' + (open ? ' active' : '') + '" data-dow="' + (i + 1) + '" aria-pressed="' + open + '">' + name + '</button>';
+    }).join('');
+  }
+
+  openDayChips.addEventListener('click', function(e) {
+    var chip = e.target.closest('.chip');
+    if (!chip || savingDays) return;
+    var dow  = parseInt(chip.getAttribute('data-dow'), 10);
+    var prev = closedDays;
+    var next = prev.indexOf(dow) === -1
+      ? prev.concat(dow)
+      : prev.filter(function(d) { return d !== dow; });
+    if (next.length === 7) { flashMsg(openDaysMsg, 'msg err', 'At least one day has to stay open.', 4000); return; }
+    closedDays = next;
+    savingDays = true;
+    renderOpenDays();
+    api('PATCH', '/admin/settings', { closed_days: next }).then(function(d) {
+      closedDays = d.settings.closed_days;
+      refreshInsights();
+    }).catch(function(err) {
+      closedDays = prev;
+      flashMsg(openDaysMsg, 'msg err', err.message, 5000);
+    }).finally(function() {
+      savingDays = false;
+      renderOpenDays();
+    });
+  });
+
+  // ── Weather ─────────────────────────────────────────────────────────────────
+
+  var WX_MIN_DAYS = 5;   // dry and rainy days each needed before comparing them
+  var WX_MIN_BAND = 3;   // days a temperature band needs before it's charted
+  var wxTempChart = barChart(document.getElementById('wxTempChart'), document.getElementById('wxTempReadout'));
+  var rainEffect  = null;   // rainy vs dry orders a day (-0.3 = 30% fewer), once there's enough to say
+
+  function wxIcon(short) {
+    var s = short.toLowerCase();
+    if (/thunder/.test(s))              return '⛈️';
+    if (/snow|sleet|flurr|ice/.test(s)) return '🌨️';
+    if (/rain|shower|drizzle/.test(s))  return '🌧️';
+    if (/fog|haze|smoke/.test(s))       return '🌫️';
+    if (/mostly (sunny|clear)/.test(s)) return '🌤️';
+    if (/partly/.test(s))               return '⛅';
+    if (/cloud/.test(s))                return '☁️';
+    if (/sunny|clear/.test(s))          return '☀️';
+    return '🌡️';
+  }
+
+  // A band of daily highs: from/to in °F, either open-ended (null).
+  function bandLabel(b) { return b.from === null ? '&lt;' + b.to + '°' : b.to === null ? b.from + '°+' : b.from + 's'; }
+  function bandName(b) {
+    return b.from === null ? 'highs under ' + b.to + '°F' : b.to === null ? 'highs of ' + b.from + '°F or more' : 'highs in the ' + b.from + 's';
+  }
+
+  function renderWeather(w, closed) {
+    var hint    = document.getElementById('wxHint');
+    var rainEl  = document.getElementById('wxRain');
+    var tempBox = document.getElementById('wxTempBox');
+    rainEffect = null;
+    if (!w.location) {
+      document.getElementById('wxPlace').textContent = 'Not set';
+      hint.textContent = 'Set the fridge’s location at the bottom of this page to start recording the weather.';
+      rainEl.innerHTML = '';
+      tempBox.hidden = true;
+      return;
+    }
+    document.getElementById('wxPlace').textContent =
+      (w.location.place ? w.location.place + ' · ' : '') + w.location.station_name + ' (' + w.location.station + ')';
+
+    var dry = w.rain.dry;
+    var wet = w.rain.wet;
+    var since = w.recorded_since && dayDate(w.recorded_since).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    hint.textContent = !since ? 'Recording the past week’s weather from ' + w.location.station + '…'
+      : plural(dry.days + wet.days, closed.length ? 'open day' : 'day') + ' recorded since ' + since + '. Covers all of them, whatever range is picked.';
+
+    function row(label, g) {
+      return '<li><span>' + label + '</span><span class="num">' + (g.orders / g.days).toFixed(1) + ' orders a day · ' + plural(g.days, 'day') + '</span></li>';
+    }
+    var html;
+    if (dry.days >= WX_MIN_DAYS && wet.days >= WX_MIN_DAYS) {
+      var dryAvg = dry.orders / dry.days;
+      rainEffect = dryAvg ? (wet.orders / wet.days) / dryAvg - 1 : null;
+      var pct = rainEffect === null ? 0 : Math.round(rainEffect * 100);
+      html = '<ul class="wx-list">' + row('☀️ Dry days', dry) + row('🌧️ Rainy days', wet) + '</ul>' +
+        '<p class="wx-verdict">' + (Math.abs(pct) < 5 ? 'Rain makes little difference to orders.'
+          : 'Rainy days average ' + Math.abs(pct) + '% ' + (pct < 0 ? 'fewer' : 'more') + ' orders.') + '</p>';
+    } else {
+      html = '<p class="empty">So far ' + plural(dry.days, 'dry day') + ' and ' + plural(wet.days, 'rainy day') +
+        '. They&rsquo;re compared once there are ' + WX_MIN_DAYS + ' of each.</p>';
+    }
+    rainEl.innerHTML = html + '<p class="hint" style="margin:0.6rem 0 0">Rainy means rain or snow in at least ' + w.rainy_hours +
+      ' hours between ' + hour12(w.daytime[0]) + ' and ' + hour12(w.daytime[1]) + '.</p>';
+
+    var bands = w.bands.filter(function(b) { return b.days >= WX_MIN_BAND; });
+    tempBox.hidden = bands.length < 2;
+    if (bands.length < 2) return;
+    var avg  = bands.map(function(b) { return b.orders / b.days; });
+    var peak = avg.reduce(function(p, v, i) { return v > avg[p] ? i : p; }, 0);
+    wxTempChart.render(bands.map(function(b, i) {
+      return {
+        value:   avg[i],
+        strong:  i === peak,
+        label:   bandLabel(b),
+        readout: 'H' + bandName(b).slice(1) + ': ' + avg[i].toFixed(1) + ' orders a day over ' + plural(b.days, 'day'),
+      };
+    }), 'Busiest with ' + bandName(bands[peak]) + ', ' + avg[peak].toFixed(1) + ' orders a day');
+  }
+
+  // The next five days' forecast above the restock list, and a word on what
+  // rain has meant for sales when it's likely on an open day.
+  function renderWeatherStrip(w, closed) {
+    var strip = document.getElementById('wxStrip');
+    var days  = (w.forecast || []).slice(0, 5);
+    strip.hidden = !days.length;
+    strip.innerHTML = days.map(function(d) {
+      var shut = closed.indexOf(d.dow) !== -1;
+      return '<div class="wx-day' + (shut ? ' closed' : '') + '" title="' + escapeAttr(d.short) + '">' +
+        '<b>' + (d.is_today ? 'Today' : DOW_SHORT[d.dow - 1]) + '</b>' +
+        '<span class="wx-icon" aria-hidden="true">' + wxIcon(d.short) + '</span>' +
+        '<span class="wx-temp">' + d.temp_f + '°</span>' +
+        '<span class="wx-rain' + (shut || d.rain_chance < 20 ? ' dry' : '') + '">' + (shut ? 'Closed' : d.rain_chance + '%') + '</span>' +
+      '</div>';
+    }).join('');
+
+    var rainy = days.filter(function(d) { return closed.indexOf(d.dow) === -1 && d.rain_chance >= 50; });
+    var note  = '';
+    if (rainy.length && rainEffect !== null && Math.abs(rainEffect) >= 0.1) {
+      var pct = Math.round(Math.abs(rainEffect) * 100);
+      note = 'Rain likely ' + rainy.map(function(d) { return d.is_today ? 'today' : DOW_SHORT[d.dow - 1]; }).join(', ') + '. ' +
+        'Rainy days have averaged ' + pct + '% ' + (rainEffect < 0 ? 'fewer orders, so stock may last longer' : 'more orders, so stock may run out sooner') +
+        ' than shown.';
+    }
+    document.getElementById('wxNote').textContent = note;
+  }
+
+  var wxMsg     = document.getElementById('wxMsg');
+  var wxHereBtn = document.getElementById('wxHereBtn');
+  var wxSaveBtn = document.getElementById('wxSaveBtn');
+  var wxCoords  = document.getElementById('wxCoords');
+
+  function saveWeatherLocation(lat, lon) {
+    wxHereBtn.disabled = wxSaveBtn.disabled = true;
+    flashMsg(wxMsg, 'msg', 'Looking that up with the National Weather Service…', 0);
+    api('PUT', '/admin/weather/location', { lat: lat, lon: lon }).then(function(d) {
+      wxCoords.value = '';
+      flashMsg(wxMsg, 'msg ok', 'Saved' + (d.location.place ? ': ' + d.location.place : '') + '. Recording the past week’s weather now.', 6000);
+      refreshInsights();
+      setTimeout(refreshInsights, 15000);   // by then the past week is usually in
+    }).catch(function(e) {
+      flashMsg(wxMsg, 'msg err', e.message, 8000);
+    }).finally(function() {
+      wxHereBtn.disabled = wxSaveBtn.disabled = false;
+    });
+  }
+
+  wxHereBtn.addEventListener('click', function() {
+    if (!navigator.geolocation) { flashMsg(wxMsg, 'msg err', 'This browser can’t share its location. Paste coordinates instead.', 6000); return; }
+    flashMsg(wxMsg, 'msg', 'Finding this phone…', 0);
+    navigator.geolocation.getCurrentPosition(function(pos) {
+      saveWeatherLocation(pos.coords.latitude, pos.coords.longitude);
+    }, function(err) {
+      flashMsg(wxMsg, 'msg err', (err.code === 1 ? 'Location access was turned down.' : 'Couldn’t find this phone.') + ' Paste coordinates instead.', 8000);
+    }, { timeout: 15000, maximumAge: 60000 });
+  });
+
+  // Takes "lat, lon" as copied from a map app.
+  wxSaveBtn.addEventListener('click', function() {
+    var m = wxCoords.value.match(/(-?\\d+(?:\\.\\d+)?)\\s*[,\\s]\\s*(-?\\d+(?:\\.\\d+)?)/);
+    if (!m) { flashMsg(wxMsg, 'msg err', 'Enter a latitude and longitude, like 47.6062, -122.3321.', 6000); return; }
+    saveWeatherLocation(parseFloat(m[1]), parseFloat(m[2]));
+  });
 
   // ── Orders ──────────────────────────────────────────────────────────────────
 
@@ -1971,10 +2274,27 @@ router.get('/stats', requireAdmin, async (req, res) => {
 router.get('/insights', requireAdmin, async (req, res) => {
   const days = req.query.range === 'all' ? null : req.query.range === '7' ? 7 : 30;
   try {
-    const { timezone } = await getSettings();
-    res.json(await getInsights(timezone, days));
+    const { timezone, closed_days, weather_location } = await getSettings();
+    const [insights, weather] = await Promise.all([
+      getInsights(timezone, days, closed_days),
+      getWeatherInsights(weather_location, timezone, closed_days),
+    ]);
+    res.json({ ...insights, weather });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Sets where the fridge is for weather. Looked up with the National Weather
+// Service before saving, so a spot it doesn't cover is refused.
+router.put('/weather/location', requireAdmin, async (req, res) => {
+  const { lat, lon } = req.body || {};
+  if (typeof lat !== 'number' || typeof lon !== 'number' || Math.abs(lat) > 90 || Math.abs(lon) > 180)
+    return res.status(400).json({ error: 'lat and lon must be numbers' });
+  try {
+    res.json({ location: await setLocation(lat, lon) });
+  } catch (err) {
+    res.status(err.badInput ? 400 : 502).json({ error: err.message });
   }
 });
 
@@ -1989,11 +2309,17 @@ router.get('/settings', requireAdmin, async (req, res) => {
 });
 
 router.patch('/settings', requireAdmin, async (req, res) => {
-  const { timezone } = req.body || {};
-  if (timezone === undefined) return res.status(400).json({ error: 'No valid fields to update' });
-  if (!US_TIMEZONES.some((tz) => tz.id === timezone)) return res.status(400).json({ error: 'Unsupported time zone' });
+  const { timezone, closed_days } = req.body || {};
+  if (timezone === undefined && closed_days === undefined) return res.status(400).json({ error: 'No valid fields to update' });
+  if (timezone !== undefined && !US_TIMEZONES.some((tz) => tz.id === timezone)) return res.status(400).json({ error: 'Unsupported time zone' });
+  if (closed_days !== undefined) {
+    if (!Array.isArray(closed_days) || !closed_days.every((d) => Number.isInteger(d) && d >= 1 && d <= 7))
+      return res.status(400).json({ error: 'closed_days must be weekday numbers from 1 (Monday) to 7 (Sunday)' });
+    if (new Set(closed_days).size === 7) return res.status(400).json({ error: 'At least one day has to stay open' });
+  }
   try {
-    await setSetting('timezone', timezone);
+    if (timezone !== undefined) await setSetting('timezone', timezone);
+    if (closed_days !== undefined) await setSetting('closed_days', [...new Set(closed_days)].sort().join(','));
     res.json({ settings: await getSettings() });
   } catch (err) {
     res.status(500).json({ error: err.message });

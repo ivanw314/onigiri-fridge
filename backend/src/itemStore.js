@@ -49,6 +49,25 @@ async function initItemsTable() {
     );
     console.log(`[ITEMS] Seeded initial item "${name}" from env vars — set a real stock count in the admin panel`);
   }
+
+  // One row per time an item sold out: from the sale that took its last unit
+  // until it was back in stock or taken off sale. No FK to items, so the
+  // history outlives a deleted item.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sellouts (
+      id         SERIAL PRIMARY KEY,
+      item_id    UUID NOT NULL,
+      item_name  TEXT NOT NULL,
+      started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      ended_at   TIMESTAMPTZ
+    )
+  `);
+  await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS sellouts_one_open ON sellouts (item_id) WHERE ended_at IS NULL`);
+  // When tracking began, so Insights can tell "nothing sold out" from "not
+  // tracked yet". Needs the settings table, which is created first.
+  await pool.query(
+    `INSERT INTO settings (key, value) VALUES ('sellouts_since', NOW()::text) ON CONFLICT (key) DO NOTHING`
+  );
   console.log('[ITEMS] Table ready');
 }
 
@@ -96,12 +115,14 @@ async function updateItem(id, updates) {
     [...values, id]
   );
   if (rows.length === 0) throw new Error(`Item not found: ${id}`);
+  if (rows[0].stock > 0 || !rows[0].active) await endSellout(id);
   return rows[0];
 }
 
 async function deleteItem(id) {
   const { rowCount } = await pool.query('DELETE FROM items WHERE id = $1', [id]);
   if (rowCount === 0) throw new Error(`Item not found: ${id}`);
+  await endSellout(id);
 }
 
 // Used to decide delete vs. deactivate: an item referenced by order history
@@ -119,6 +140,7 @@ async function restoreStock(id, qty) {
     `UPDATE items SET stock = stock + $2, updated_at = NOW() WHERE id = $1 RETURNING *`,
     [id, qty]
   );
+  if (rows[0]?.stock > 0) await endSellout(id);
   return rows[0] ?? null;
 }
 
@@ -131,6 +153,7 @@ async function adjustStock(id, delta) {
     `UPDATE items SET stock = GREATEST(stock + $2, 0), updated_at = NOW() WHERE id = $1 RETURNING *`,
     [id, delta]
   );
+  if (rows[0]?.stock > 0) await endSellout(id);
   return rows[0] ?? null;
 }
 
@@ -141,21 +164,24 @@ async function adjustStock(id, delta) {
 // fulfilled — callers should treat that as "can't fulfill this order".
 async function decrementStockForItems(items) {
   const client = await pool.connect();
+  const soldOut = [];
   try {
     await client.query('BEGIN');
     for (const { item_id, quantity } of items) {
       const { rows } = await client.query(
         `UPDATE items SET stock = stock - $2, updated_at = NOW()
          WHERE id = $1 AND active = true AND stock >= $2
-         RETURNING id`,
+         RETURNING id, stock`,
         [item_id, quantity]
       );
       if (rows.length === 0) {
         await client.query('ROLLBACK');
         return false;
       }
+      if (rows[0].stock === 0) soldOut.push(item_id);
     }
     await client.query('COMMIT');
+    for (const id of soldOut) await startSellout(id);
     return true;
   } catch (err) {
     await client.query('ROLLBACK');
@@ -172,6 +198,33 @@ async function restoreStockForItems(items) {
   for (const { item_id, quantity } of items) {
     if (!item_id) continue;
     await restoreStock(item_id, quantity);
+  }
+}
+
+// ── Sell-outs ─────────────────────────────────────────────────────────────────
+// Only a sale starts one, so zeroing stock by hand (say, binning leftovers at
+// closing) isn't counted. Bookkeeping for Insights, so these never throw: a
+// failed write mustn't break a sale or a restock.
+
+async function startSellout(id) {
+  try {
+    // Re-checks stock, since a restock may have landed since the sale.
+    await pool.query(
+      `INSERT INTO sellouts (item_id, item_name)
+       SELECT id, name FROM items WHERE id = $1 AND stock <= 0 AND active
+       ON CONFLICT DO NOTHING`,
+      [id]
+    );
+  } catch (err) {
+    console.error(`[ITEMS] Failed to record sell-out of ${id}:`, err.message);
+  }
+}
+
+async function endSellout(id) {
+  try {
+    await pool.query('UPDATE sellouts SET ended_at = NOW() WHERE item_id = $1 AND ended_at IS NULL', [id]);
+  } catch (err) {
+    console.error(`[ITEMS] Failed to end sell-out of ${id}:`, err.message);
   }
 }
 

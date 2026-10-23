@@ -18,7 +18,13 @@ const US_TIMEZONES = [
 ];
 
 const DEFAULTS = {
-  timezone: 'America/Los_Angeles',
+  timezone:    'America/Los_Angeles',
+  // ISO weekdays (1 = Monday … 7 = Sunday) the fridge isn't in use. Insights
+  // don't count them as days when averaging. Stored as e.g. "6,7".
+  closed_days: [],
+  // Where the fridge is, for weather (see weather.js): lat, lon, place,
+  // station, station_name, forecast_url. Stored as JSON.
+  weather_location: null,
 };
 
 async function initSettingsTable() {
@@ -37,7 +43,9 @@ async function getSettings() {
   const { rows } = await pool.query('SELECT key, value FROM settings');
   const settings = { ...DEFAULTS };
   for (const { key, value } of rows) {
-    if (key in DEFAULTS) settings[key] = value;
+    if (key === 'closed_days') settings.closed_days = value ? value.split(',').map(Number) : [];
+    else if (key === 'weather_location') settings.weather_location = JSON.parse(value);
+    else if (key in DEFAULTS) settings[key] = value;
   }
   return settings;
 }

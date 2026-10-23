@@ -10,6 +10,7 @@ const {
 const { initItemsTable, restoreStockForItems } = require('./itemStore');
 const { initSettingsTable } = require('./settingsStore');
 const { initActivityTable, logActivity } = require('./activityLog');
+const { initWeatherTable, refreshWeather } = require('./weather');
 const { createRefund } = require('./square');
 
 const app = express();
@@ -116,9 +117,10 @@ const PORT = process.env.PORT || 3000;
 
 async function start() {
   await initDB();
-  await initItemsTable();
   await initSettingsTable();
+  await initItemsTable();
   await initActivityTable();
+  await initWeatherTable();
   // A restart loses in-memory state (which unlock came from the admin panel,
   // the device's last heartbeat), so mark it on the timeline.
   await logActivity({ source: 'server', event: 'started' });
@@ -135,6 +137,11 @@ async function start() {
       console.error('[ORDER] Failed to complete stale dispensing orders:', err.message);
     });
   }, 30 * 1000);
+
+  // Forecast, plus any finished day's weather not yet recorded. Does nothing
+  // until a location is set in the admin panel.
+  refreshWeather();
+  setInterval(refreshWeather, 60 * 60 * 1000);
 
   app.listen(PORT, () => console.log(`[SERVER] Listening on port ${PORT}`));
 }
