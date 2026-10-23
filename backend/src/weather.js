@@ -217,37 +217,124 @@ function refreshWeather() {
   return queue;
 }
 
+// Orders placed during a weather_days row's day, as a subquery.
+const ORDERS_THAT_DAY = (day) => `(SELECT COUNT(*) FROM orders o
+   WHERE o.status = 'complete'
+     AND o.created_at >= ${day}::timestamp AT TIME ZONE $1
+     AND o.created_at <  (${day} + 1)::timestamp AT TIME ZONE $1)`;
+
+// Each rainy day against the dry days of its own weekday, so a rainy spell
+// that happened to land on quiet weekdays isn't blamed on the rain. Only
+// counts rainy days whose weekday has at least 2 dry days to compare with.
+function sameWeekdayRain(days) {
+  const dry = {};
+  for (const d of days) {
+    if (d.wet) continue;
+    dry[d.dow] = dry[d.dow] || { days: 0, orders: 0 };
+    dry[d.dow].days++;
+    dry[d.dow].orders += d.orders;
+  }
+  const out = { rainy_days: 0, orders: 0, expected: 0 };
+  for (const d of days) {
+    const base = dry[d.dow];
+    if (!d.wet || !base || base.days < 2) continue;
+    out.rainy_days++;
+    out.orders   += d.orders;
+    out.expected += base.orders / base.days;
+  }
+  return out;
+}
+
+// Units of each active item a day in each kind of weather, counted from the
+// item's first sale so a new item's empty earlier days don't count against it.
+// "Warmer" is the upper half of recorded daily highs, so it adapts to the
+// place and the season.
+function itemsByWeather(days, itemRows, unitRows) {
+  const highs = days.map((d) => d.temp_max_f).filter((t) => t !== null).sort((a, b) => a - b);
+  const warmFrom = highs.length ? Math.round(highs[Math.floor(highs.length / 2)]) : null;
+  const units = {};
+  for (const r of unitRows) units[`${r.day} ${r.item_id}`] = r.units;
+  const group = () => ({ days: 0, units: 0 });
+  const items = itemRows.map((item) => {
+    const g = { name: item.name, units: 0, wet: group(), dry: group(), warm: group(), cool: group() };
+    for (const d of days) {
+      if (d.day < item.first_day) continue;
+      const u = units[`${d.day} ${item.id}`] || 0;
+      g.units += u;
+      for (const k of [d.wet ? 'wet' : 'dry', d.temp_max_f === null ? null : d.temp_max_f >= warmFrom ? 'warm' : 'cool']) {
+        if (!k) continue;
+        g[k].days++;
+        g[k].units += u;
+      }
+    }
+    return g;
+  });
+  return { warm_from: warmFrom, items: items.sort((a, b) => b.units - a.units) };
+}
+
 // Sales against the recorded weather: every recorded open day from the first
-// sale on, whatever range is picked. Plus the forecast from today on.
+// sale on, whatever range is picked. Plus the last few open days one by one,
+// and the forecast from today on.
 async function getWeatherInsights(location, timezone, closedDays) {
   if (!location) return { location: null };
-  const [daysQ, sinceQ] = await Promise.all([
+  const params    = [timezone, location.station, closedDays];
+  const openDay   = (d) => `EXTRACT(ISODOW FROM ${d})::int <> ALL($3::int[])`;
+  const firstSale = `(SELECT date_trunc('day', MIN(created_at) AT TIME ZONE $1) FROM orders WHERE status = 'complete')`;
+  const [daysQ, sinceQ, recentQ, itemsQ, unitsQ] = await Promise.all([
     pool.query(
-      `SELECT w.wet_hours, w.temp_max_f,
-              (SELECT COUNT(*) FROM orders o
-               WHERE o.status = 'complete'
-                 AND o.created_at >= w.day::timestamp AT TIME ZONE $1
-                 AND o.created_at <  (w.day + 1)::timestamp AT TIME ZONE $1) AS orders
+      `SELECT w.day::text AS day, EXTRACT(ISODOW FROM w.day)::int AS dow, w.wet_hours, w.temp_max_f,
+              ${ORDERS_THAT_DAY('w.day')} AS orders
        FROM weather_days w
-       WHERE w.station = $2
-         AND EXTRACT(ISODOW FROM w.day)::int <> ALL($3::int[])
-         AND w.day >= (SELECT (MIN(created_at) AT TIME ZONE $1)::date FROM orders WHERE status = 'complete')`,
-      [timezone, location.station, closedDays]
+       WHERE w.station = $2 AND ${openDay('w.day')} AND w.day >= ${firstSale}`,
+      params
     ),
     pool.query(`SELECT MIN(day)::text AS since FROM weather_days WHERE station = $1`, [location.station]),
+    // The last 7 finished open days, weather or not (a station gap, or days
+    // from before recording began, just show no weather).
+    pool.query(
+      `SELECT d::date::text AS day, EXTRACT(ISODOW FROM d)::int AS dow,
+              w.temp_max_f, w.wet_hours, w.summary, ${ORDERS_THAT_DAY('d::date')} AS orders
+       FROM generate_series(date_trunc('day', NOW() AT TIME ZONE $1) - INTERVAL '21 days',
+                            date_trunc('day', NOW() AT TIME ZONE $1) - INTERVAL '1 day', INTERVAL '1 day') AS d
+       LEFT JOIN weather_days w ON w.station = $2 AND w.day = d::date
+       WHERE ${openDay('d')} AND d >= ${firstSale}
+       ORDER BY d DESC
+       LIMIT 7`,
+      params
+    ),
+    pool.query(
+      `SELECT i.id, i.name, (MIN(o.created_at) AT TIME ZONE $1)::date::text AS first_day
+       FROM items i
+       JOIN order_items oi ON oi.item_id = i.id
+       JOIN orders o ON o.id = oi.order_id AND o.status = 'complete'
+       WHERE i.active
+       GROUP BY i.id, i.name`,
+      [timezone]
+    ),
+    pool.query(
+      `SELECT w.day::text AS day, oi.item_id, SUM(oi.quantity)::int AS units
+       FROM weather_days w
+       JOIN orders o ON o.status = 'complete'
+                    AND o.created_at >= w.day::timestamp AT TIME ZONE $1
+                    AND o.created_at <  (w.day + 1)::timestamp AT TIME ZONE $1
+       JOIN order_items oi ON oi.order_id = o.id
+       WHERE w.station = $2 AND ${openDay('w.day')}
+       GROUP BY 1, 2`,
+      params
+    ),
   ]);
 
+  const days  = daysQ.rows.map((r) => ({ ...r, orders: parseInt(r.orders, 10) || 0, wet: r.wet_hours >= RAINY_HOURS }));
   const rain  = { dry: { days: 0, orders: 0 }, wet: { days: 0, orders: 0 } };
   const bands = TEMP_BANDS.map(([from, to]) => ({ from, to, days: 0, orders: 0 }));
-  for (const r of daysQ.rows) {
-    const orders = parseInt(r.orders, 10) || 0;
-    const g = r.wet_hours >= RAINY_HOURS ? rain.wet : rain.dry;
+  for (const d of days) {
+    const g = d.wet ? rain.wet : rain.dry;
     g.days++;
-    g.orders += orders;
-    if (r.temp_max_f !== null) {
-      const b = bands.find((x) => (x.from === null || r.temp_max_f >= x.from) && (x.to === null || r.temp_max_f < x.to));
+    g.orders += d.orders;
+    if (d.temp_max_f !== null) {
+      const b = bands.find((x) => (x.from === null || d.temp_max_f >= x.from) && (x.to === null || d.temp_max_f < x.to));
       b.days++;
-      b.orders += orders;
+      b.orders += d.orders;
     }
   }
 
@@ -258,7 +345,15 @@ async function getWeatherInsights(location, timezone, closedDays) {
     rainy_hours: RAINY_HOURS,
     daytime: [DAYTIME_FROM, DAYTIME_TO],
     rain,
+    same_weekday: sameWeekdayRain(days),
     bands,
+    // recorded is false for a day with no weather (station gap, or before
+    // recording began).
+    recent: recentQ.rows.map((r) => ({
+      day: r.day, dow: r.dow, orders: parseInt(r.orders, 10) || 0,
+      recorded: r.wet_hours !== null, temp_max_f: r.temp_max_f, wet: r.wet_hours >= RAINY_HOURS, wet_hours: r.wet_hours, summary: r.summary,
+    })),
+    ...itemsByWeather(days, itemsQ.rows, unitsQ.rows),
     forecast: forecast ? forecast.days.filter((d) => d.date >= today).map((d) => ({
       ...d,
       dow:      new Date(`${d.date}T12:00:00Z`).getUTCDay() || 7,

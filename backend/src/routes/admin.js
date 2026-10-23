@@ -207,6 +207,16 @@ router.get('/', (req, res) => {
     .restock-left.oos { color: #c00; }
 
     /* Insights */
+    .seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; padding: 3px; background: #e8e8e1; border-radius: 12px; }
+    .seg button {
+      background: none; color: #666; border-radius: 9px; padding: 0.5rem 0; font-size: 0.88rem; font-weight: 600;
+    }
+    .seg button:hover:not(:disabled) { opacity: 1; color: #111; }
+    .seg button[aria-pressed="true"] { background: #fff; color: #111; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+    #insightsTab[data-view="sales"]   [data-view]:not([data-view="sales"]),
+    #insightsTab[data-view="stock"]   [data-view]:not([data-view="stock"]),
+    #insightsTab[data-view="weather"] [data-view]:not([data-view="weather"]) { display: none; }
+    #rangeChips { margin-bottom: 0; }
     .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.1rem 0.75rem; }
     .tile-num { font-size: 1.2rem; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
     .tile-delta { font-size: 0.72rem; font-weight: 600; color: #999; margin-top: 0.2rem; font-variant-numeric: tabular-nums; }
@@ -233,7 +243,20 @@ router.get('/', (req, res) => {
     .wx-list { list-style: none; display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.88rem; }
     .wx-list li { display: flex; justify-content: space-between; gap: 1rem; }
     .wx-verdict { font-weight: 600; font-size: 0.9rem; margin-top: 0.75rem; }
-    .wx-strip { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0.3rem; margin-bottom: 0.6rem; }
+    .wx-sub     { font-size: 0.83rem; color: #555; margin-top: 0.35rem; }
+    .wx-recent  { list-style: none; font-size: 0.85rem; }
+    .wx-recent li { display: grid; grid-template-columns: 1fr 4.5rem 5rem; gap: 0.5rem; align-items: center; padding: 0.4rem 0; border-top: 1px solid #f0f0f0; }
+    .wx-recent li:first-child { border-top: none; padding-top: 0; }
+    .wx-recent .num { text-align: right; }
+    .wx-none { color: #bbb; font-size: 0.78rem; }
+    .wx-items { display: grid; grid-template-columns: 1fr 3.75rem 3.75rem; gap: 0.5rem; align-items: center; padding: 0.45rem 0; border-top: 1px solid #f0f0f0; font-size: 0.88rem; }
+    .wx-items > span + span { text-align: right; }
+    .wx-items.head { border-top: none; padding-top: 0; font-size: 0.72rem; font-weight: 600; color: #999; }
+    .chg      { font-weight: 600; color: #999; font-variant-numeric: tabular-nums; }
+    .chg.up   { color: #1a7a1a; }
+    .chg.down { color: #c00; }
+    .wx-strip { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0.3rem; }
+    .wx-note  { color: #1a5cbf; }
     .wx-day { display: flex; flex-direction: column; align-items: center; gap: 0.05rem; padding: 0.45rem 0; border-radius: 10px; background: #f6f6f1; font-size: 0.72rem; }
     .wx-day.closed { opacity: 0.45; }
     .wx-day b    { font-size: 0.72rem; color: #555; }
@@ -450,20 +473,29 @@ router.get('/', (req, res) => {
       </div>
     </section>
 
-    <section class="tab" data-tab="insights" hidden>
-      <div class="chips" id="rangeChips" role="group" aria-label="Time range">
+    <!-- Three views, picked by the switch: each card names the one it's in
+         with data-view, and CSS shows only the current view's cards. -->
+    <section class="tab" data-tab="insights" id="insightsTab" data-view="sales" hidden>
+      <div class="seg" id="insightsViews" role="group" aria-label="Insights view">
+        <button data-show="sales" aria-pressed="true">Sales</button>
+        <button data-show="stock" aria-pressed="false">Stock</button>
+        <button data-show="weather" aria-pressed="false">Weather</button>
+      </div>
+
+      <!-- Sales: everything here follows the range buttons. -->
+      <div class="chips" id="rangeChips" data-view="sales" role="group" aria-label="Time range">
         <button class="chip" data-range="7" aria-pressed="false">7 days</button>
         <button class="chip" data-range="30" aria-pressed="false">30 days</button>
         <button class="chip" data-range="all" aria-pressed="false">All time</button>
       </div>
 
-      <div class="card">
+      <div class="card" data-view="sales">
         <h2>Summary</h2>
         <div class="tiles" id="insSummary"></div>
         <div class="ins-notes" id="insNotes"></div>
       </div>
 
-      <div class="card">
+      <div class="card" data-view="sales">
         <h2>Busiest times</h2>
         <h3 class="item-group-heading">Time of day</h3>
         <p class="week-readout" id="hourReadout"></p>
@@ -473,18 +505,7 @@ router.get('/', (req, res) => {
         <div class="week" id="dowChart"></div>
       </div>
 
-      <div class="card">
-        <h2>Weather</h2>
-        <p class="hint" id="wxHint"></p>
-        <div id="wxRain"></div>
-        <div id="wxTempBox" hidden>
-          <h3 class="item-group-heading chart-heading">Daily high</h3>
-          <p class="week-readout" id="wxTempReadout"></p>
-          <div class="week" id="wxTempChart"></div>
-        </div>
-      </div>
-
-      <div class="card">
+      <div class="card" data-view="sales">
         <h2>Top items</h2>
         <ol class="top-list" id="topItems"><li class="empty">Loading&#x2026;</li></ol>
         <div id="pairsBox" hidden>
@@ -493,37 +514,51 @@ router.get('/', (req, res) => {
         </div>
       </div>
 
-      <div class="card">
+      <!-- Stock: fixed windows, each card saying which. -->
+      <div class="card" data-view="stock">
+        <h2>Restock forecast</h2>
+        <p class="hint" id="forecastHint"></p>
+        <p class="hint wx-note" id="wxNote"></p>
+        <div id="forecast"><p class="empty">Loading&#x2026;</p></div>
+      </div>
+
+      <div class="card" data-view="stock">
         <h2>Sell-outs</h2>
         <p class="hint" id="selloutHint"></p>
         <div id="sellouts"><p class="empty">Loading&#x2026;</p></div>
       </div>
 
-      <div class="card">
-        <h2>Restock forecast</h2>
-        <p class="hint" id="forecastHint"></p>
-        <div class="wx-strip" id="wxStrip" hidden></div>
-        <p class="hint" id="wxNote"></p>
-        <div id="forecast"><p class="empty">Loading&#x2026;</p></div>
+      <!-- Weather: every recorded day. -->
+      <div class="card" data-view="weather" id="wxSetupCard" hidden>
+        <h2>Weather</h2>
+        <p class="hint">See how rain and temperature affect sales, with a forecast for the days ahead. It starts once the fridge&rsquo;s location is set.</p>
+        <button id="wxSetupBtn">Set the location</button>
       </div>
 
-      <div class="card">
-        <h2>Open days</h2>
-        <p class="status-sub" style="margin:-0.5rem 0 1rem">Days the fridge is in use. Closed days don&rsquo;t count toward daily averages or the restock forecast, and are left off the day-of-week chart. A sale made on one still counts in the totals.</p>
-        <div class="chips" id="openDayChips" role="group" aria-label="Open days"></div>
-        <p class="msg" id="openDaysMsg"></p>
+      <div class="card" data-view="weather" id="wxForecastCard" hidden>
+        <h2>Next 5 days</h2>
+        <div class="wx-strip" id="wxStrip"></div>
       </div>
 
-      <div class="card">
-        <h2>Weather location</h2>
-        <p class="status-sub" style="margin:-0.5rem 0 1rem">Where the fridge is, for weather from the National Weather Service (US only). Each finished day&rsquo;s weather is recorded from the nearest airport station.</p>
-        <p class="wx-place" id="wxPlace">Not set</p>
-        <div class="wx-zip">
-          <input type="text" id="wxZip" inputmode="numeric" autocomplete="postal-code" placeholder="ZIP code, e.g. 98101" aria-label="ZIP code">
-          <button class="sm-btn primary" id="wxSaveBtn">Save</button>
+      <div class="card" data-view="weather" id="wxRecentCard" hidden>
+        <h2>Recent days</h2>
+        <ul class="wx-recent" id="wxRecent"></ul>
+      </div>
+
+      <div class="card" data-view="weather" id="wxStatsCard" hidden>
+        <h2>Weather &amp; sales</h2>
+        <p class="hint" id="wxHint"></p>
+        <h3 class="item-group-heading">Rain</h3>
+        <div id="wxRain"></div>
+        <div id="wxTempBox" hidden>
+          <h3 class="item-group-heading chart-heading">Daily high</h3>
+          <p class="week-readout" id="wxTempReadout"></p>
+          <div class="week" id="wxTempChart"></div>
         </div>
-        <button class="secondary" id="wxHereBtn">&#x1F4CD; Or use this phone&rsquo;s location</button>
-        <p class="msg" id="wxMsg"></p>
+        <div id="wxItemsBox" hidden>
+          <h3 class="item-group-heading chart-heading">By item</h3>
+          <div id="wxItems"></div>
+        </div>
       </div>
     </section>
 
@@ -554,13 +589,29 @@ router.get('/', (req, res) => {
         <p class="msg" id="otaMsg"></p>
       </div>
 
-      <div class="card">
-        <h2>Store time zone</h2>
+      <div class="card" id="storeCard">
+        <h2>Store</h2>
+        <h3 class="item-group-heading">Time zone</h3>
         <label class="field-label" for="tzSelect">When &ldquo;Today&rdquo; starts for sales stats</label>
         <select id="tzSelect"></select>
         <p class="status-sub" id="tzNow" style="margin:-0.35rem 0 0.75rem"></p>
-        <button id="settingsBtn">Save</button>
+        <button class="secondary" id="settingsBtn">Save time zone</button>
         <p class="msg" id="settingsMsg"></p>
+
+        <h3 class="item-group-heading chart-heading">Open days</h3>
+        <p class="status-sub" style="margin:0 0 0.75rem">Days the fridge is in use. Closed days don&rsquo;t count toward daily averages or the restock forecast, and are left off the day-of-week chart. A sale made on one still counts in the totals. Saved as you tap.</p>
+        <div class="chips" id="openDayChips" role="group" aria-label="Open days"></div>
+        <p class="msg" id="openDaysMsg"></p>
+
+        <h3 class="item-group-heading chart-heading">Weather location</h3>
+        <p class="status-sub" style="margin:0 0 0.75rem">Where the fridge is, for weather from the National Weather Service (US only). Each finished day&rsquo;s weather is recorded from the nearest airport station.</p>
+        <p class="wx-place" id="wxPlace">Not set</p>
+        <div class="wx-zip">
+          <input type="text" id="wxZip" inputmode="numeric" autocomplete="postal-code" placeholder="ZIP code, e.g. 98101" aria-label="ZIP code">
+          <button class="sm-btn primary" id="wxSaveBtn">Save</button>
+        </div>
+        <button class="secondary" id="wxHereBtn">&#x1F4CD; Or use this phone&rsquo;s location</button>
+        <p class="msg" id="wxMsg"></p>
       </div>
 
       <div class="card">
@@ -922,6 +973,31 @@ router.get('/', (req, res) => {
     refreshInsights();
   });
 
+  // Sales / Stock / Weather. One request fills all three, so switching is
+  // instant. Remembered, like the range.
+  var INSIGHT_VIEWS = ['sales', 'stock', 'weather'];
+  var insightsTab   = document.getElementById('insightsTab');
+  var insightsView  = 'sales';
+  try { insightsView = localStorage.getItem('insightsView') || 'sales'; } catch (e) {}
+  if (INSIGHT_VIEWS.indexOf(insightsView) === -1) insightsView = 'sales';
+
+  function showInsightsView(view) {
+    insightsView = view;
+    insightsTab.setAttribute('data-view', view);
+    document.querySelectorAll('#insightsViews button').forEach(function(b) {
+      b.setAttribute('aria-pressed', b.getAttribute('data-show') === view ? 'true' : 'false');
+    });
+    try { localStorage.setItem('insightsView', view); } catch (e) {}
+  }
+  showInsightsView(insightsView);
+
+  document.getElementById('insightsViews').addEventListener('click', function(e) {
+    var b = e.target.closest('button');
+    if (!b || b.getAttribute('data-show') === insightsView) return;
+    showInsightsView(b.getAttribute('data-show'));
+    scroller.scrollTop = 0;
+  });
+
   function refreshInsights() {
     var req = ++insightsReq;
     api('GET', '/admin/insights?range=' + insightsRange).then(function(ins) {
@@ -935,7 +1011,6 @@ router.get('/', (req, res) => {
       renderWeather(ins.weather, closed);
       renderForecast(ins.forecast);
       renderWeatherStrip(ins.weather, closed);
-      if (!savingDays) { closedDays = closed; renderOpenDays(); }
     }).catch(function() {});
   }
 
@@ -1055,7 +1130,7 @@ router.get('/', (req, res) => {
     var since   = so.tracked_since && dayDate(so.tracked_since).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
     document.getElementById('selloutHint').textContent = !so.open_days ? ''
       : so.partial ? 'Out of ' + plural(so.open_days, dayWord) + ' since tracking started on ' + since + '.'
-      : 'Out of ' + plural(so.open_days, dayWord) + ' in this range.';
+      : 'Out of the ' + plural(so.open_days, dayWord) + ' in the last ' + so.days + ' days.';
     document.getElementById('sellouts').innerHTML = so.items.length ? so.items.map(function(it) {
       var detail = [];
       if (it.usual_minute !== null) {
@@ -1068,14 +1143,13 @@ router.get('/', (req, res) => {
         '<div><div class="fc-name">' + escapeAttr(it.item_name) + '</div><div class="item-price">' + detail.join(' · ') + '</div></div>' +
         '<span class="fc-eta low">' + plural(it.days_sold_out + it.days_out_all_day, 'day') + '</span>' +
       '</div>';
-    }).join('') : '<p class="empty">Nothing sold out in this range.</p>';
+    }).join('') : '<p class="empty">Nothing sold out in the last ' + so.days + ' days.</p>';
   }
 
   function renderForecast(f) {
     var someClosed = f.open_days < f.window_days;
     document.getElementById('forecastHint').textContent =
-      'Based on sales over the last ' + plural(f.window_days, 'day') + (someClosed ? ' (' + f.open_days + ' open)' : '') +
-      ', whatever range is picked above.';
+      'Based on sales over the last ' + plural(f.window_days, 'day') + (someClosed ? ' (' + f.open_days + ' open)' : '') + '.';
     // Soonest to run out first; items with no recent sales last.
     var rows = f.items.slice().sort(function(a, b) {
       var da = a.stock <= 0 ? -1 : a.days_left === null ? Infinity : a.days_left;
@@ -1105,8 +1179,8 @@ router.get('/', (req, res) => {
   }
 
   // ── Open days ───────────────────────────────────────────────────────────────
-  // Saved as soon as a day is tapped. The chips follow each Insights refresh,
-  // except while a save is in flight.
+  // In the Device tab's Store card. Saved as soon as a day is tapped; filled
+  // in by loadSettings.
 
   var closedDays   = [];      // ISO weekdays, 1 = Mon … 7 = Sun
   var savingDays   = false;
@@ -1134,7 +1208,6 @@ router.get('/', (req, res) => {
     renderOpenDays();
     api('PATCH', '/admin/settings', { closed_days: next }).then(function(d) {
       closedDays = d.settings.closed_days;
-      refreshInsights();
     }).catch(function(err) {
       closedDays = prev;
       flashMsg(openDaysMsg, 'msg err', err.message, 5000);
@@ -1146,10 +1219,13 @@ router.get('/', (req, res) => {
 
   // ── Weather ─────────────────────────────────────────────────────────────────
 
-  var WX_MIN_DAYS = 5;   // dry and rainy days each needed before comparing them
-  var WX_MIN_BAND = 3;   // days a temperature band needs before it's charted
-  var wxTempChart = barChart(document.getElementById('wxTempChart'), document.getElementById('wxTempReadout'));
-  var rainEffect  = null;   // rainy vs dry orders a day (-0.3 = 30% fewer), once there's enough to say
+  var WX_MIN_DAYS  = 5;    // days needed on each side of a comparison
+  var WX_MIN_BAND  = 3;    // days a temperature band needs before it's charted
+  var WX_MIN_UNITS = 10;   // units an item needs to have sold to be compared
+  var wxTempChart  = barChart(document.getElementById('wxTempChart'), document.getElementById('wxTempReadout'));
+  // Rainy vs dry orders a day (-0.3 = 30% fewer), once there's enough to say:
+  // the same-weekday figure when there is one, as it's the fairer of the two.
+  var rainEffect   = null;
 
   function wxIcon(short) {
     var s = short.toLowerCase();
@@ -1170,47 +1246,128 @@ router.get('/', (req, res) => {
     return b.from === null ? 'highs under ' + b.to + '°F' : b.to === null ? 'highs of ' + b.from + '°F or more' : 'highs in the ' + b.from + 's';
   }
 
-  function renderWeather(w, closed) {
-    var hint    = document.getElementById('wxHint');
-    var rainEl  = document.getElementById('wxRain');
-    var tempBox = document.getElementById('wxTempBox');
-    rainEffect = null;
-    if (!w.location) {
-      document.getElementById('wxPlace').textContent = 'Not set';
-      hint.textContent = 'Set the fridge’s location at the bottom of this page to start recording the weather.';
-      rainEl.innerHTML = '';
-      tempBox.hidden = true;
-      return;
-    }
-    document.getElementById('wxPlace').textContent =
-      (w.location.zip ? w.location.zip + ' · ' : '') + (w.location.place ? w.location.place + ' · ' : '') +
-      w.location.station_name + ' (' + w.location.station + ')';
+  // A change as "+12%" / "−8%", colored, or a dash with nothing to compare.
+  function pctChange(cur, base) {
+    if (!base) return '<span class="chg">—</span>';
+    var pct = Math.round((cur / base - 1) * 100);
+    return '<span class="chg' + (pct > 0 ? ' up' : pct < 0 ? ' down' : '') + '">' + (pct > 0 ? '+' : pct < 0 ? '−' : '') + Math.abs(pct) + '%</span>';
+  }
 
+  function moreOrFewer(effect, what) {
+    var pct = Math.round(effect * 100);
+    return Math.abs(pct) < 5 ? 'about the same ' + what : Math.abs(pct) + '% ' + (pct < 0 ? 'fewer ' : 'more ') + what;
+  }
+
+  // The Store card's line saying where weather comes from.
+  function renderWeatherPlace(loc) {
+    document.getElementById('wxPlace').textContent = !loc ? 'Not set'
+      : (loc.zip ? loc.zip + ' · ' : '') + (loc.place ? loc.place + ' · ' : '') + loc.station_name + ' (' + loc.station + ')';
+  }
+
+  // The Weather view: a prompt until a location is set, then the forecast,
+  // recent days and the comparisons.
+  function renderWeather(w, closed) {
+    var set = Boolean(w.location);
+    rainEffect = null;
+    document.getElementById('wxSetupCard').hidden  = set;
+    document.getElementById('wxRecentCard').hidden = !set || !w.recent.length;
+    document.getElementById('wxStatsCard').hidden  = !set;
+    if (!set) return;
+    renderWeatherPlace(w.location);
+    var since = w.recorded_since && dayDate(w.recorded_since).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    document.getElementById('wxHint').textContent = !since ? 'Recording the past week’s weather from ' + w.location.station + '…'
+      : 'Covers the ' + plural(w.rain.dry.days + w.rain.wet.days, closed.length ? 'open day' : 'day') + ' recorded since ' + since + '.';
+    renderRecentWeather(w.recent);
+    renderRain(w);
+    renderTempBands(w.bands);
+    renderWeatherItems(w);
+  }
+
+  // Takes you to the Store card's location setting.
+  document.getElementById('wxSetupBtn').addEventListener('click', function() {
+    location.hash = 'device';
+    setTimeout(function() { document.getElementById('wxPlace').scrollIntoView({ block: 'center' }); }, 50);
+  });
+
+  // The last 7 open days one by one: useful before there's enough for averages.
+  function renderRecentWeather(days) {
+    document.getElementById('wxRecent').innerHTML = days.map(function(d) {
+      var date  = dayDate(d.day).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+      var icon  = d.wet ? (/snow|sleet/i.test(d.summary || '') ? '🌨️' : '🌧️') : wxIcon(d.summary || '');
+      var wx    = !d.recorded ? '<span class="wx-none">No weather</span>'
+        : icon + (d.temp_max_f === null ? '' : ' ' + Math.round(d.temp_max_f) + '°');
+      var title = !d.recorded ? 'No weather recorded for this day'
+        : (d.summary || '') + (d.wet_hours ? ', rain or snow in ' + plural(d.wet_hours, 'hour') : '');
+      return '<li title="' + escapeAttr(title) + '"><span>' + date + '</span><span>' + wx + '</span>' +
+        '<span class="num">' + plural(d.orders, 'order') + '</span></li>';
+    }).join('');
+  }
+
+  function renderRain(w) {
     var dry = w.rain.dry;
     var wet = w.rain.wet;
-    var since = w.recorded_since && dayDate(w.recorded_since).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    hint.textContent = !since ? 'Recording the past week’s weather from ' + w.location.station + '…'
-      : plural(dry.days + wet.days, closed.length ? 'open day' : 'day') + ' recorded since ' + since + '. Covers all of them, whatever range is picked.';
-
+    var sw  = w.same_weekday;
+    var html;
     function row(label, g) {
       return '<li><span>' + label + '</span><span class="num">' + (g.orders / g.days).toFixed(1) + ' orders a day · ' + plural(g.days, 'day') + '</span></li>';
     }
-    var html;
-    if (dry.days >= WX_MIN_DAYS && wet.days >= WX_MIN_DAYS) {
-      var dryAvg = dry.orders / dry.days;
-      rainEffect = dryAvg ? (wet.orders / wet.days) / dryAvg - 1 : null;
-      var pct = rainEffect === null ? 0 : Math.round(rainEffect * 100);
+    if (dry.days >= WX_MIN_DAYS && wet.days >= WX_MIN_DAYS && dry.orders) {
+      rainEffect = (wet.orders / wet.days) / (dry.orders / dry.days) - 1;
       html = '<ul class="wx-list">' + row('☀️ Dry days', dry) + row('🌧️ Rainy days', wet) + '</ul>' +
-        '<p class="wx-verdict">' + (Math.abs(pct) < 5 ? 'Rain makes little difference to orders.'
-          : 'Rainy days average ' + Math.abs(pct) + '% ' + (pct < 0 ? 'fewer' : 'more') + ' orders.') + '</p>';
+        '<p class="wx-verdict">Rainy days average ' + moreOrFewer(rainEffect, 'orders') + '.</p>';
+      // Rainy Fridays against dry Fridays and so on, so the weekdays the rain
+      // happened to fall on don't skew it.
+      if (sw.rainy_days >= WX_MIN_DAYS && sw.expected) {
+        rainEffect = sw.orders / sw.expected - 1;
+        html += '<p class="wx-sub">Against dry days of the same weekday, it&rsquo;s ' + moreOrFewer(rainEffect, 'orders') +
+          ' (' + plural(sw.rainy_days, 'rainy day') + ' compared).</p>';
+      } else {
+        html += '<p class="wx-sub">Comparing rainy days with dry days of the same weekday shows once ' + WX_MIN_DAYS +
+          ' rainy days have a dry match (' + sw.rainy_days + ' so far).</p>';
+      }
     } else {
       html = '<p class="empty">So far ' + plural(dry.days, 'dry day') + ' and ' + plural(wet.days, 'rainy day') +
         '. They&rsquo;re compared once there are ' + WX_MIN_DAYS + ' of each.</p>';
     }
-    rainEl.innerHTML = html + '<p class="hint" style="margin:0.6rem 0 0">Rainy means rain or snow in at least ' + w.rainy_hours +
-      ' hours between ' + hour12(w.daytime[0]) + ' and ' + hour12(w.daytime[1]) + '.</p>';
+    document.getElementById('wxRain').innerHTML = html + '<p class="hint" style="margin:0.6rem 0 0">Rainy means rain or snow in at least ' +
+      w.rainy_hours + ' hours between ' + hour12(w.daytime[0]) + ' and ' + hour12(w.daytime[1]) + '.</p>';
+  }
 
-    var bands = w.bands.filter(function(b) { return b.days >= WX_MIN_BAND; });
+  // Each item's units a day in rain vs dry, and on warmer vs cooler days,
+  // once it has sold enough and has enough days on both sides.
+  function renderWeatherItems(w) {
+    function ready(a, b) { return a.days >= WX_MIN_DAYS && b.days >= WX_MIN_DAYS && b.units > 0; }
+    var rows = w.items.filter(function(it) {
+      return it.units >= WX_MIN_UNITS && (ready(it.wet, it.dry) || ready(it.warm, it.cool));
+    });
+    document.getElementById('wxItemsBox').hidden = !rows.length;
+    if (!rows.length) return;
+
+    // Call out the biggest swing, if it's a real one.
+    var top = null;
+    rows.forEach(function(it) {
+      [['wet', 'dry', 'on rainy days'], ['warm', 'cool', 'on days of ' + w.warm_from + '°F or more']].forEach(function(c) {
+        if (!ready(it[c[0]], it[c[1]])) return;
+        var e = (it[c[0]].units / it[c[0]].days) / (it[c[1]].units / it[c[1]].days) - 1;
+        if (Math.abs(e) >= 0.15 && (!top || Math.abs(e) > Math.abs(top.e))) top = { name: it.name, e: e, when: c[2] };
+      });
+    });
+
+    function cell(a, b) { return ready(a, b) ? pctChange(a.units / a.days, b.units / b.days) : '<span class="chg">—</span>'; }
+    document.getElementById('wxItems').innerHTML =
+      (top ? '<p class="wx-verdict" style="margin:0 0 0.6rem">' + escapeAttr(top.name) + ' sells ' + Math.round(Math.abs(top.e) * 100) + '% ' +
+        (top.e < 0 ? 'less ' : 'more ') + top.when + '.</p>' : '') +
+      '<div class="wx-items head"><span></span><span>Rain</span><span>' + w.warm_from + '°F+</span></div>' +
+      rows.map(function(it) {
+        return '<div class="wx-items"><span>' + escapeAttr(it.name) + '</span>' + cell(it.wet, it.dry) + cell(it.warm, it.cool) + '</div>';
+      }).join('') +
+      '<p class="hint" style="margin:0.6rem 0 0">Units sold a day on rainy days against dry ones, and on days reaching ' + w.warm_from +
+      '°F (the warmer half of days recorded) against cooler ones. Each item counts from its first sale.</p>';
+  }
+
+  function renderTempBands(allBands) {
+    var tempBox = document.getElementById('wxTempBox');
+    var bands = allBands.filter(function(b) { return b.days >= WX_MIN_BAND; });
     tempBox.hidden = bands.length < 2;
     if (bands.length < 2) return;
     var avg  = bands.map(function(b) { return b.orders / b.days; });
@@ -1225,13 +1382,13 @@ router.get('/', (req, res) => {
     }), 'Busiest with ' + bandName(bands[peak]) + ', ' + avg[peak].toFixed(1) + ' orders a day');
   }
 
-  // The next five days' forecast above the restock list, and a word on what
-  // rain has meant for sales when it's likely on an open day.
+  // The next five days on the Weather view, and a line on the restock
+  // forecast saying what rain has meant for sales when it's likely on an
+  // open day.
   function renderWeatherStrip(w, closed) {
-    var strip = document.getElementById('wxStrip');
-    var days  = (w.forecast || []).slice(0, 5);
-    strip.hidden = !days.length;
-    strip.innerHTML = days.map(function(d) {
+    var days = (w.forecast || []).slice(0, 5);
+    document.getElementById('wxForecastCard').hidden = !days.length;
+    document.getElementById('wxStrip').innerHTML = days.map(function(d) {
       var shut = closed.indexOf(d.dow) !== -1;
       return '<div class="wx-day' + (shut ? ' closed' : '') + '" title="' + escapeAttr(d.short) + '">' +
         '<b>' + (d.is_today ? 'Today' : DOW_SHORT[d.dow - 1]) + '</b>' +
@@ -1263,9 +1420,8 @@ router.get('/', (req, res) => {
     flashMsg(wxMsg, 'msg', 'Looking that up with the National Weather Service…', 0);
     api('PUT', '/admin/weather/location', where).then(function(d) {
       wxZip.value = '';
-      flashMsg(wxMsg, 'msg ok', 'Saved' + (d.location.place ? ': ' + d.location.place : '') + '. Recording the past week’s weather now.', 6000);
-      refreshInsights();
-      setTimeout(refreshInsights, 15000);   // by then the past week is usually in
+      renderWeatherPlace(d.location);
+      flashMsg(wxMsg, 'msg ok', 'Saved. The past week’s weather is being recorded now; see Insights → Weather.', 8000);
     }).catch(function(e) {
       flashMsg(wxMsg, 'msg err', e.message, 8000);
     }).finally(function() {
@@ -1274,7 +1430,7 @@ router.get('/', (req, res) => {
   }
 
   wxHereBtn.addEventListener('click', function() {
-    if (!navigator.geolocation) { flashMsg(wxMsg, 'msg err', 'This browser can’t share its location. Paste coordinates instead.', 6000); return; }
+    if (!navigator.geolocation) { flashMsg(wxMsg, 'msg err', 'This browser can’t share its location. Enter the ZIP code instead.', 6000); return; }
     flashMsg(wxMsg, 'msg', 'Finding this phone…', 0);
     navigator.geolocation.getCurrentPosition(function(pos) {
       saveWeatherLocation({ lat: pos.coords.latitude, lon: pos.coords.longitude });
@@ -2124,6 +2280,8 @@ router.get('/', (req, res) => {
       showStoreTime();
       renderOrders();
       renderLatestOrders();
+      if (!savingDays) { closedDays = d.settings.closed_days; renderOpenDays(); }
+      renderWeatherPlace(d.settings.weather_location);
     }).catch(function() {});
   }
 

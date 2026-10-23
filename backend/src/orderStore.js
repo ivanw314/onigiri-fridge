@@ -419,6 +419,9 @@ async function getOrderStats(timezone) {
 // Analysis for the admin Insights tab over the last `days` store-local days
 // (including today), or all history when days is null. Like getOrderStats,
 // only completed orders count as sales and revenue is pre-tax.
+// The window Insights' sell-outs cover, in days back from today.
+const SELLOUT_DAYS = 30;
+
 // How many calendar days from today it takes to get through openDays of
 // trading, stepping over closed weekdays (ISO numbers).
 function calendarDaysFor(openDays, todayDow, closedDays) {
@@ -558,9 +561,11 @@ async function getInsights(timezone, days, closedDays = []) {
                             INTERVAL '1 day') AS d`,
       [...params, closedDays]
     ),
-    // Each open day in the range an item sold out, or spent entirely sold out
-    // (a sell-out that carried over from an earlier day without a restock
-    // before it started), and its median sell-out time.
+    // Each open day of the last SELLOUT_DAYS an item sold out, or spent
+    // entirely sold out (a sell-out that carried over from an earlier day
+    // without a restock before it started), and its median sell-out time.
+    // A fixed window rather than the picked range: it sits on the Stock view,
+    // which has no range buttons.
     pool.query(
       `WITH out_days AS (
          SELECT s.item_id, s.item_name, s.started_at, d,
@@ -581,11 +586,10 @@ async function getInsights(timezone, days, closedDays = []) {
        FROM out_days o LEFT JOIN items i ON i.id = o.item_id
        GROUP BY o.item_id, i.name
        ORDER BY COUNT(DISTINCT o.d) DESC, 1`,
-      [...params, closedDays]
+      [timezone, SELLOUT_DAYS, closedDays]
     ),
-    // The open days in the range that sell-outs were tracked for: tracking
-    // started with this feature, so older ranges are only partly covered.
-    // ${start} is NULL for all time, which GREATEST and COALESCE skip.
+    // The open days in that window that sell-outs were tracked for: tracking
+    // started with this feature, so at first it's only partly covered.
     pool.query(
       `SELECT COUNT(*) FILTER (WHERE EXTRACT(ISODOW FROM d)::int <> ALL($3::int[])) AS open_days,
               to_char(MIN(t.since_day), 'YYYY-MM-DD') AS since,
@@ -595,7 +599,7 @@ async function getInsights(timezone, days, closedDays = []) {
             (SELECT date_trunc('day', MIN(created_at) AT TIME ZONE $1) AS first_day
              FROM orders WHERE status = 'complete') f,
             generate_series(GREATEST(t.since_day, f.first_day, ${start}), ${today}, INTERVAL '1 day') AS d`,
-      [...params, closedDays]
+      [timezone, SELLOUT_DAYS, closedDays]
     ),
   ]);
 
@@ -655,6 +659,7 @@ async function getInsights(timezone, days, closedDays = []) {
     // usual_minute: median minutes after midnight it sold out, null when it
     // only carried over from earlier days.
     sellouts: {
+      days:          SELLOUT_DAYS,
       open_days:     n(tracked.open_days),
       tracked_since: tracked.since,
       partial:       Boolean(tracked.partial),
