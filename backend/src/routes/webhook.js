@@ -7,6 +7,7 @@ const {
 const { decrementStockForItems, restoreStockForItems } = require('../itemStore');
 const { getSquareOrder, createRefund } = require('../square');
 const { publishUnlock } = require('../mqttClient');
+const { logActivity } = require('../activityLog');
 
 const router = Router();
 
@@ -78,8 +79,11 @@ async function handleSquareWebhook(req) {
     }
   }
 
+  // These two are the restaurant's other Square sales (register, online
+  // ordering) on the same account — routine, so logged as info. console.warn
+  // goes to stderr, which Railway shows as an error and buries real ones.
   if (!order_id) {
-    console.warn('[WEBHOOK] Could not resolve reference_id — dropping event');
+    console.log(`[WEBHOOK] Ignoring payment ${payment.id} — no reference_id, not a fridge sale`);
     return;
   }
 
@@ -89,7 +93,7 @@ async function handleSquareWebhook(req) {
   // the DB driver throws on malformed UUID input rather than just returning
   // no rows, so check the shape first.
   if (!UUID_RE.test(order_id)) {
-    console.warn(`[WEBHOOK] reference_id "${order_id}" isn't one of our orders — dropping event`);
+    console.log(`[WEBHOOK] Ignoring payment ${payment.id} — reference_id "${order_id}" isn't a fridge order`);
     return;
   }
 
@@ -139,8 +143,9 @@ async function handleSquareWebhook(req) {
     if (!ok) {
       console.warn(`[WEBHOOK] Out of stock for order ${order_id} — refunding instead of unlocking`);
       await updateOrder(order_id, { status: 'refunded' });
+      await logActivity({ order_id, device_id: order.device_id, source: 'server', event: 'out_of_stock' });
       try {
-        await createRefund({ payment_id: payment.id, order_id, amount_cents });
+        await createRefund({ payment_id: payment.id, order_id, amount_cents, reason: 'Sold out before payment completed' });
         console.log(`[REFUND] Square refund issued for order ${order_id} (out of stock)`);
       } catch (refundErr) {
         console.error(`[REFUND] Square refund failed for order ${order_id}:`, refundErr.message);
@@ -154,13 +159,15 @@ async function handleSquareWebhook(req) {
     publishUnlock(order.device_id, order_id);
     // Status advances to 'dispensing' when the device publishes an 'unlocked' event
     // (handled in index.js via the MQTT emitter).
+    await logActivity({ order_id, device_id: order.device_id, source: 'server', event: 'unlock_sent' });
   } catch (err) {
     console.error(`[WEBHOOK] Failed to publish unlock for ${order_id}:`, err.message);
+    await logActivity({ order_id, device_id: order.device_id, source: 'server', event: 'unlock_failed', detail: { error: err.message } });
     await updateOrder(order_id, { status: 'refunded' });
     if (stockLines.length > 0) await restoreStockForItems(stockLines);
     if (payment.id) {
       try {
-        await createRefund({ payment_id: payment.id, order_id, amount_cents });
+        await createRefund({ payment_id: payment.id, order_id, amount_cents, reason: 'Fridge could not be unlocked' });
         console.log(`[REFUND] Square refund issued for order ${order_id}`);
       } catch (refundErr) {
         console.error(`[REFUND] Square refund failed for order ${order_id}:`, refundErr.message);

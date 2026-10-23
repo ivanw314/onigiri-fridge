@@ -9,6 +9,7 @@ const {
 } = require('./orderStore');
 const { initItemsTable, restoreStockForItems } = require('./itemStore');
 const { initSettingsTable } = require('./settingsStore');
+const { initActivityTable, logActivity } = require('./activityLog');
 const { createRefund } = require('./square');
 
 const app = express();
@@ -34,10 +35,17 @@ app.get('/health', (_req, res) => res.json({ ok: true, ts: Date.now() }));
 emitter.on('deviceEvent', async ({ device_id, event, order_id: eventOrderId }) => {
   try {
     // Events during an admin-panel unlock belong to no order.
+    const adminUnlock = isAdminUnlockActive(device_id);
     let order_id = eventOrderId;
-    if (!order_id && !isAdminUnlockActive(device_id)) {
+    if (!order_id && !adminUnlock) {
       order_id = (await getInProgressOrderForDevice(device_id))?.id;
     }
+    // Recorded even when no order matches, so door activity outside a sale
+    // still shows in the admin panel's activity log.
+    await logActivity({
+      order_id, device_id, source: 'fridge', event,
+      detail: !order_id && adminUnlock ? { admin_unlock: true } : null,
+    });
     if (!order_id) return;
 
     const order = await getOrder(order_id);
@@ -110,6 +118,10 @@ async function start() {
   await initDB();
   await initItemsTable();
   await initSettingsTable();
+  await initActivityTable();
+  // A restart loses in-memory state (which unlock came from the admin panel,
+  // the device's last heartbeat), so mark it on the timeline.
+  await logActivity({ source: 'server', event: 'started' });
   await connectMQTT();
 
   // Sweep abandoned pending orders (checkout started, never paid) over to

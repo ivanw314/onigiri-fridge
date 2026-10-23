@@ -1,6 +1,7 @@
 'use strict';
 const { v4: uuidv4 } = require('uuid');
 const { pool, isUuid } = require('./db');
+const { logActivity } = require('./activityLog');
 
 // SSE response objects — ephemeral by nature, stays in-memory
 const sseClients = new Map(); // order_id → Set<res>
@@ -93,6 +94,7 @@ async function cancelPendingOrderForDevice(device_id) {
   if (order) {
     console.log(`[ORDER] Cancelled ${order.id} for device ${device_id} (customer returned to edit cart)`);
     _notifySSEClients(order.id, 'cancelled');
+    await logActivity({ order_id: order.id, device_id, source: 'customer', event: 'checkout_cancelled' });
   }
   return order;
 }
@@ -108,11 +110,12 @@ async function expireStalePendingOrders() {
     `UPDATE orders SET status = 'timed_out', updated_at = NOW()
      WHERE status = 'pending'
        AND created_at <= NOW() - INTERVAL '${PENDING_ORDER_TIMEOUT_MINUTES} minutes'
-     RETURNING id`
+     RETURNING id, device_id`
   );
-  for (const { id } of rows) {
+  for (const { id, device_id } of rows) {
     console.log(`[ORDER] ${id} → timed_out`);
     _notifySSEClients(id, 'timed_out');
+    await logActivity({ order_id: id, device_id, source: 'server', event: 'checkout_expired' });
   }
   if (rows.length > 0) {
     console.log(`[ORDER] Expired ${rows.length} stale pending order(s)`);
@@ -129,12 +132,16 @@ async function claimPendingOrderForPayment(order_id, { square_payment_id, square
     `UPDATE orders
      SET status = 'paid', square_payment_id = $2, square_order_id = $3, total_cents = $4, updated_at = NOW()
      WHERE id = $1 AND status = 'pending'
-     RETURNING id`,
+     RETURNING device_id`,
     [order_id, square_payment_id, square_order_id, total_cents]
   );
   if (rows.length === 0) return false;
   console.log(`[ORDER] ${order_id} → paid`);
   _notifySSEClients(order_id, 'paid');
+  await logActivity({
+    order_id, device_id: rows[0].device_id, source: 'square', event: 'paid',
+    detail: { payment_id: square_payment_id, amount_cents: total_cents },
+  });
   return true;
 }
 
@@ -148,12 +155,16 @@ async function claimUnpaidOrderForLateRefund(order_id, { square_payment_id, squa
     `UPDATE orders
      SET status = 'refunded', square_payment_id = $2, square_order_id = $3, total_cents = $4, updated_at = NOW()
      WHERE id = $1 AND status <> 'pending' AND square_payment_id IS NULL
-     RETURNING id`,
+     RETURNING device_id`,
     [order_id, square_payment_id, square_order_id, total_cents]
   );
   if (rows.length === 0) return false;
   console.log(`[ORDER] ${order_id} → refunded`);
   _notifySSEClients(order_id, 'refunded');
+  await logActivity({
+    order_id, device_id: rows[0].device_id, source: 'square', event: 'late_payment',
+    detail: { payment_id: square_payment_id, amount_cents: total_cents },
+  });
   return true;
 }
 
@@ -195,12 +206,13 @@ async function completeOrderIfDoorOpened(order_id) {
   const { rows } = await pool.query(
     `UPDATE orders SET status = 'complete', updated_at = NOW()
      WHERE id = $1 AND status = 'dispensing' AND door_opened_at IS NOT NULL
-     RETURNING id`,
+     RETURNING device_id`,
     [order_id]
   );
   if (rows.length === 0) return false;
   console.log(`[ORDER] ${order_id} → complete`);
   _notifySSEClients(order_id, 'complete');
+  await logActivity({ order_id, device_id: rows[0].device_id, source: 'server', event: 'complete' });
   return true;
 }
 
@@ -215,11 +227,12 @@ async function completeStaleDispensingOrders() {
     `UPDATE orders SET status = 'complete', updated_at = NOW()
      WHERE status = 'dispensing'
        AND door_opened_at <= NOW() - INTERVAL '${DISPENSE_SWEEP_MINUTES} minutes'
-     RETURNING id`
+     RETURNING id, device_id`
   );
-  for (const { id } of rows) {
+  for (const { id, device_id } of rows) {
     console.log(`[ORDER] ${id} → complete (door was opened; close never received)`);
     _notifySSEClients(id, 'complete');
+    await logActivity({ order_id: id, device_id, source: 'server', event: 'complete', detail: { door_close_missed: true } });
   }
   return rows.length;
 }

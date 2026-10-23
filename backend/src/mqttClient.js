@@ -3,6 +3,7 @@ const mqtt = require('mqtt');
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
 const { v4: uuidv4 } = require('uuid');
+const { logActivity } = require('./activityLog');
 
 const emitter = new EventEmitter();
 
@@ -16,20 +17,9 @@ const deviceHeartbeats = new Map();
 // Cleared by the next customer unlock.
 const adminUnlocks = new Set(); // device_id
 
-const MAX_EVENTS      = 50;
-const recentEvents    = []; // newest-first ring buffer
 const otaPending      = new Set(); // devices mid-OTA (ota_start seen, not yet back online)
 const RESTART_EVENTS  = new Set(['ota_start', 'rebooting', 'wifi_updating', 'wifi_reset']);
 const deviceWifiInfo  = new Map(); // device_id → { ssid, rssi, ts }
-
-function pushEvent(device_id, event) {
-  recentEvents.unshift({ device_id, event, ts: new Date().toISOString() });
-  if (recentEvents.length > MAX_EVENTS) recentEvents.pop();
-}
-
-function getRecentEvents() {
-  return recentEvents.slice();
-}
 
 let client = null;
 
@@ -91,24 +81,25 @@ function handleMessage(topic, rawPayload) {
 
   const [, device_id, type] = parts;
 
+  // Status changes are recorded in the activity log here; every other device
+  // event is recorded by the handler in index.js, once it has worked out
+  // which order the event belongs to.
   if (type === 'status') {
     const raw = rawPayload.toString();
     if (raw === 'offline') {
       deviceHeartbeats.delete(device_id);
-      pushEvent(device_id, 'offline');
+      logActivity({ device_id, source: 'fridge', event: 'offline' });
       console.warn(`[MQTT] Device ${device_id} went offline`);
     } else {
+      // Heartbeats arrive every 30s, so only the change back to online is
+      // logged — logging each one buried everything else in Railway's logs.
       const wasOffline = !deviceHeartbeats.has(device_id);
       deviceHeartbeats.set(device_id, new Date());
       if (wasOffline) {
-        if (otaPending.has(device_id)) {
-          otaPending.delete(device_id);
-          pushEvent(device_id, 'ota_complete');
-        } else {
-          pushEvent(device_id, 'online');
-        }
+        const event = otaPending.delete(device_id) ? 'ota_complete' : 'online';
+        logActivity({ device_id, source: 'fridge', event });
+        console.log(`[MQTT] Device ${device_id} ${event === 'online' ? 'online' : 'back online after OTA'}`);
       }
-      console.log(`[MQTT] Heartbeat from ${device_id}`);
     }
     return;
   }
@@ -149,7 +140,6 @@ function handleMessage(topic, rawPayload) {
     if (RESTART_EVENTS.has(event)) deviceHeartbeats.delete(device_id);
     if (event === 'ota_start') otaPending.add(device_id);
     if (event === 'ota_failed') otaPending.delete(device_id);
-    pushEvent(device_id, event);
     console.log(`[MQTT] Event from ${device_id}: ${event}`, order_id ? `(order ${order_id})` : '');
     emitter.emit('deviceEvent', { device_id, event, order_id });
   }
@@ -337,7 +327,6 @@ module.exports = {
   isDeviceOnline,
   getDeviceLastSeen,
   getDeviceWifiInfo,
-  getRecentEvents,
   isAdminUnlockActive,
   emitter,
 };

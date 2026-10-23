@@ -1,4 +1,5 @@
 'use strict';
+const { logActivity } = require('./activityLog');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -132,21 +133,30 @@ async function getSquareOrder(square_order_id) {
 // ── createRefund ──────────────────────────────────────────────────────────────
 // Issues a full refund for a completed Square payment.
 // Called when an order transitions to 'refunded' after a failed or timed-out unlock.
+// reason shows in the Square dashboard, so callers pass the real one.
+// Every attempt is recorded on the order's activity timeline.
 
 async function createRefund({ payment_id, order_id, amount_cents, reason = 'Unlock timeout — item not dispensed' }) {
   const cents = amount_cents ?? parseInt(process.env.ITEM_PRICE_CENTS || '300', 10);
-  return squareFetch('/v2/refunds', {
-    method: 'POST',
-    body: JSON.stringify({
-      idempotency_key: `refund-${order_id}`,
-      payment_id,
-      reason,
-      amount_money: {
-        amount:   cents,
-        currency: 'USD',
-      },
-    }),
-  });
+  try {
+    const data = await squareFetch('/v2/refunds', {
+      method: 'POST',
+      body: JSON.stringify({
+        idempotency_key: `refund-${order_id}`,
+        payment_id,
+        reason,
+        amount_money: {
+          amount:   cents,
+          currency: 'USD',
+        },
+      }),
+    });
+    await logActivity({ order_id, source: 'server', event: 'refund_issued', detail: { amount_cents: cents, reason } });
+    return data;
+  } catch (err) {
+    await logActivity({ order_id, source: 'server', event: 'refund_failed', detail: { amount_cents: cents, reason, error: err.message } });
+    throw err;
+  }
 }
 
 module.exports = { createPaymentLink, getSquareOrder, createRefund };

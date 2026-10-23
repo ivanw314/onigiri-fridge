@@ -4,6 +4,7 @@ const { isDeviceOnline } = require('../mqttClient');
 const { createOrder, addOrderItems, updateOrder, getActiveOrderForDevice, cancelPendingOrderForDevice } = require('../orderStore');
 const { getItem } = require('../itemStore');
 const { createPaymentLink } = require('../square');
+const { logActivity } = require('../activityLog');
 
 const router = Router();
 
@@ -97,11 +98,13 @@ router.post('/', async (req, res) => {
 
     // Attach the Square order ID so the webhook handler can match it back
     await updateOrder(order.id, { square_order_id });
+    await logActivity({ order_id: order.id, device_id, source: 'customer', event: 'checkout_started' });
 
     return res.json({ checkout_url, order_id: order.id });
 
   } catch (err) {
     console.error('[CHECKOUT] Error:', err.message);
+    await logActivity({ order_id: order.id, device_id, source: 'server', event: 'checkout_failed', detail: { error: err.message } });
     // Don't leave a dangling pending order — mark it refunded
     // (no payment was taken, so no actual refund needed, just state cleanup)
     await updateOrder(order.id, { status: 'refunded' });

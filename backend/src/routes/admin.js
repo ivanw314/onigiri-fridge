@@ -2,8 +2,9 @@
 const { Router } = require('express');
 const {
   publishOTA, publishLock, publishAdminUnlock, publishReboot, publishWifiUpdate, publishWifiReset,
-  isDeviceOnline, getDeviceLastSeen, getDeviceWifiInfo, getRecentEvents,
+  isDeviceOnline, getDeviceLastSeen, getDeviceWifiInfo,
 } = require('../mqttClient');
+const { logActivity, getOrderActivity, getRecentActivity } = require('../activityLog');
 const {
   getRecentOrders, getOrderStats, getInsights, getOrder, updateOrder, deleteOrder, deleteAllOrders,
   getActiveOrderForDevice, getInProgressOrderForDevice,
@@ -249,6 +250,10 @@ router.get('/', (req, res) => {
     .order-lines li { display: flex; justify-content: space-between; gap: 1rem; }
     .order-lines .tax { color: #999; }
     .order-actions { display: flex; gap: 0.5rem; margin-top: 0.85rem; }
+    .timeline-head { color: #999; margin: 0.85rem 0 0.4rem; }
+    .timeline { list-style: none; display: flex; flex-direction: column; gap: 0.3rem; }
+    .timeline li { display: flex; align-items: flex-start; gap: 0.5rem; }
+    .timeline .event-dot { margin-top: 0.4em; }
     .badge {
       display: inline-block; padding: 0.15rem 0.55rem;
       border-radius: 6px; font-size: 0.75rem; font-weight: 600; white-space: nowrap;
@@ -296,11 +301,12 @@ router.get('/', (req, res) => {
 
     /* Device */
     .event-list { list-style: none; display: flex; flex-direction: column; max-height: 260px; overflow-y: auto; }
-    .event-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0; border-top: 1px solid #f0f0f0; font-size: 0.83rem; }
+    .event-item { display: flex; align-items: flex-start; gap: 0.5rem; padding: 0.4rem 0; border-top: 1px solid #f0f0f0; font-size: 0.83rem; }
     .event-item:first-child { border-top: none; }
+    .event-item .event-dot { margin-top: 0.4em; }
     .event-dot  { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-    .event-name { flex: 1; }
-    .event-time { color: #bbb; font-size: 0.75rem; white-space: nowrap; }
+    .event-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+    .event-meta { display: block; color: #aaa; font-size: 0.75rem; margin-top: 0.1rem; }
     .card.danger { border: 1.5px solid #f5c0c0; }
     .card.danger h2 { color: #c00; }
     .danger-item + .danger-item { border-top: 1px solid #f7e0e0; margin-top: 1rem; padding-top: 1rem; }
@@ -985,6 +991,7 @@ router.get('/', (req, res) => {
   var orderList    = [];   // what the Orders tab is showing
   var ordersMore   = false;
   var openOrders   = {};   // ids of expanded cards, kept across refreshes
+  var orderHistory = {};   // id → activity rows, fetched while its card is open
   var orderReq     = 0;    // lets a newer request drop an older one's response
   var latestOrders = [];   // Home's read-only list
 
@@ -1006,6 +1013,14 @@ router.get('/', (req, res) => {
       orderList  = rows;
       ordersMore = rows.length === limit;
       renderOrders();
+      Object.keys(openOrders).forEach(loadOrderHistory);
+    }).catch(function() {});
+  }
+
+  function loadOrderHistory(id) {
+    api('GET', '/admin/orders/' + id + '/activity').then(function(rows) {
+      orderHistory[id] = rows;
+      if (openOrders[id]) renderOrders();
     }).catch(function() {});
   }
 
@@ -1079,11 +1094,25 @@ router.get('/', (req, res) => {
         (o.door_opened_at ? '<dt>Door opened</dt><dd>' + fmtTime(o.door_opened_at, true) + '</dd>' : '') +
         '<dt>Updated</dt><dd>' + fmtTime(o.updated_at, true) + '</dd>' +
       '</dl>' +
+      '<div class="timeline-head">History</div>' +
+      orderHistoryHtml(orderHistory[o.id]) +
       '<div class="order-actions">' +
         (canRefund ? '<button class="sm-btn danger refund-btn">Refund</button>' : '') +
         '<button class="sm-btn delete-btn">Delete</button>' +
       '</div>' +
     '</div>';
+  }
+
+  function orderHistoryHtml(rows) {
+    if (!rows) return '<p class="empty">Loading&#x2026;</p>';
+    if (!rows.length) return '<p class="empty">Nothing recorded &#x2014; this order is older than the history log.</p>';
+    return '<ul class="timeline">' + rows.map(function(r) {
+      return '<li>' +
+        '<span class="event-dot" style="background:' + activityColor(r) + '"></span>' +
+        '<span class="num">' + fmtClock(r.created_at) + '</span>' +
+        '<span>' + activityLabel(r) + '</span>' +
+      '</li>';
+    }).join('') + '</ul>';
   }
 
   function findOrder(id) {
@@ -1131,7 +1160,12 @@ router.get('/', (req, res) => {
     var o  = findOrder(id);
     if (!o) return;
     if (e.target.closest('.order-toggle')) {
-      if (openOrders[id]) delete openOrders[id]; else openOrders[id] = true;
+      if (openOrders[id]) {
+        delete openOrders[id];
+      } else {
+        openOrders[id] = true;
+        loadOrderHistory(id);
+      }
       renderOrders();
       return;
     }
@@ -1156,6 +1190,7 @@ router.get('/', (req, res) => {
       api('DELETE', '/admin/orders/' + id).then(function() {
         orderList = orderList.filter(function(x) { return x.id !== id; });
         delete openOrders[id];
+        delete orderHistory[id];
         renderOrders();
       }).catch(function(err) {
         alert('Delete failed: ' + err.message);
@@ -1172,6 +1207,7 @@ router.get('/', (req, res) => {
     api('DELETE', '/admin/orders').then(function(d) {
       orderList    = [];
       openOrders   = {};
+      orderHistory = {};
       latestOrders = [];
       renderOrders();
       renderLatestOrders();
@@ -1549,27 +1585,84 @@ router.get('/', (req, res) => {
 
   // ── Device ──────────────────────────────────────────────────────────────────
 
-  function eventColor(evt) {
-    if (evt === 'auth_failed' || evt === 'ota_failed' || evt === 'offline' || evt === 'unlock_timeout') return '#c00';
-    if (evt === 'ota_start' || evt === 'rebooting' || evt === 'wifi_updating' || evt === 'wifi_reset') return '#b45309';
-    if (evt === 'online' || evt === 'unlocked' || evt === 'ota_complete') return '#1a7a1a';
+  // Wording and colour for activity log rows, shared by this tab's list and
+  // each order's History. Admin actions get their own colour so it's easy to
+  // spot who opened the fridge.
+  var ACTIVITY_RED   = ['refund_failed', 'unlock_failed', 'checkout_failed', 'auth_failed', 'ota_failed', 'offline', 'unlock_timeout'];
+  var ACTIVITY_AMBER = ['late_payment', 'out_of_stock', 'refund_issued', 'started', 'ota_start', 'rebooting', 'wifi_updating', 'wifi_reset'];
+  var ACTIVITY_GREEN = ['paid', 'complete', 'unlocked', 'online', 'ota_complete'];
+
+  function activityColor(r) {
+    if (ACTIVITY_RED.indexOf(r.event) !== -1)   return '#c00';
+    if (r.source === 'admin')                   return '#1a5cbf';
+    if (ACTIVITY_AMBER.indexOf(r.event) !== -1) return '#b45309';
+    if (ACTIVITY_GREEN.indexOf(r.event) !== -1) return '#1a7a1a';
     return '#888';
   }
 
+  function activityLabel(r) {
+    var d = r.detail || {};
+    var text;
+    switch (r.event) {
+      case 'checkout_started':   text = 'Checkout started &#x2014; sent to Square'; break;
+      case 'checkout_cancelled': text = 'Customer went back to edit their cart &#x2014; checkout cancelled'; break;
+      case 'checkout_expired':   text = 'Checkout expired unpaid &#x2014; fridge was never unlocked'; break;
+      case 'checkout_failed':    text = 'Couldn&#x2019;t create the Square checkout: ' + escapeAttr(d.error); break;
+      case 'paid':               text = 'Paid ' + money(d.amount_cents); break;
+      case 'late_payment':       text = 'Paid ' + money(d.amount_cents) + ' after the checkout had ended &#x2014; refunding'; break;
+      case 'out_of_stock':       text = 'Sold out before payment completed &#x2014; refunding'; break;
+      case 'unlock_sent':        text = 'Unlock sent to fridge'; break;
+      case 'unlock_failed':      text = 'Couldn&#x2019;t send unlock: ' + escapeAttr(d.error); break;
+      case 'complete':           text = d.door_close_missed ? 'Completed (door close never received)' : 'Completed'; break;
+      case 'refund_issued':      text = 'Refunded ' + money(d.amount_cents) + ' &#x2014; ' + escapeAttr(d.reason); break;
+      case 'refund_failed':      text = 'Refund of ' + money(d.amount_cents) + ' FAILED: ' + escapeAttr(d.error); break;
+      case 'unlocked':           text = 'Fridge unlocked'; break;
+      case 'door_open':          text = 'Door opened'; break;
+      case 'door_closed':        text = 'Door closed'; break;
+      case 'locked':
+      case 'relocked':           text = 'Fridge locked'; break;
+      case 'unlock_timeout':     text = 'Door not opened within 60s &#x2014; relocked'; break;
+      case 'already_unlocked':   text = 'Fridge was already unlocked'; break;
+      case 'auth_failed':        text = 'Fridge rejected a command (failed signature or time check)'; break;
+      case 'online':             text = 'Fridge online'; break;
+      case 'offline':            text = 'Fridge offline'; break;
+      case 'ota_start':          text = 'Firmware update started'; break;
+      case 'ota_failed':         text = 'Firmware update failed'; break;
+      case 'ota_complete':       text = 'Firmware update complete'; break;
+      case 'rebooting':          text = 'Fridge rebooting'; break;
+      case 'wifi_updating':      text = 'Fridge switching WiFi network'; break;
+      case 'wifi_reset':         text = 'Fridge WiFi erased &#x2014; in setup mode'; break;
+      case 'started':            text = 'Server restarted'; break;
+      case 'admin_unlock':       text = 'Admin unlocked the fridge'; break;
+      case 'admin_lock':         text = 'Admin locked the fridge'; break;
+      case 'admin_reboot':       text = 'Admin rebooted the fridge'; break;
+      case 'admin_wifi_update':  text = 'Admin changed WiFi to &#x201C;' + escapeAttr(d.ssid) + '&#x201D;'; break;
+      case 'admin_wifi_reset':   text = 'Admin reset the fridge&#x2019;s WiFi'; break;
+      case 'admin_ota':          text = 'Admin started a firmware update'; break;
+      case 'order_deleted':      text = 'Admin deleted the order'; break;
+      case 'orders_cleared':     text = 'Admin deleted all orders (' + d.count + ')'; break;
+      default:                   text = escapeAttr(r.event).replace(/_/g, ' ');
+    }
+    if (d.admin_unlock) text += ' (admin unlock)';
+    return text;
+  }
+
   function refreshEvents() {
-    api('GET', '/admin/events').then(function(events) {
+    api('GET', '/admin/events').then(function(rows) {
       var el = document.getElementById('eventLog');
-      if (!events.length) {
+      if (!rows.length) {
         el.innerHTML = '<p class="empty">No events yet.</p>';
         return;
       }
       el.innerHTML = '<ul class="event-list">' +
-        events.map(function(e) {
-          var color = eventColor(e.event);
+        rows.map(function(r) {
           return '<li class="event-item">' +
-            '<span class="event-dot" style="background:' + color + '"></span>' +
-            '<span class="event-name">' + e.event.replace(/_/g, ' ') + '</span>' +
-            '<span class="event-time">' + timeAgo(e.ts) + '</span>' +
+            '<span class="event-dot" style="background:' + activityColor(r) + '"></span>' +
+            '<span class="event-name">' + activityLabel(r) +
+              '<span class="event-meta">' + fmtTime(r.created_at, true) +
+                (r.order_id ? ' &#xB7; order ' + r.order_id.slice(0, 8) : '') +
+              '</span>' +
+            '</span>' +
             '</li>';
         }).join('') + '</ul>';
     }).catch(function() {});
@@ -1767,6 +1860,13 @@ router.get('/', (req, res) => {
     return new Date(iso).toLocaleString('en-US', opts);
   }
 
+  // Time of day only, for a single order's History.
+  function fmtClock(iso) {
+    var opts = { hour: 'numeric', minute: '2-digit', second: '2-digit' };
+    if (storeTz) opts.timeZone = storeTz;
+    return new Date(iso).toLocaleTimeString('en-US', opts);
+  }
+
   // Relative while recent, a real date once "3d ago" stops being useful.
   function orderTime(iso) {
     return Date.now() - new Date(iso) < 86400000 ? timeAgo(iso) : fmtTime(iso);
@@ -1793,8 +1893,12 @@ router.get('/', (req, res) => {
 
 // ── API endpoints ─────────────────────────────────────────────────────────────
 
-router.get('/events', requireAdmin, (req, res) => {
-  res.json(getRecentEvents());
+router.get('/events', requireAdmin, async (req, res) => {
+  try {
+    res.json(await getRecentActivity(100));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 router.get('/status', requireAdmin, (req, res) => {
@@ -1833,6 +1937,7 @@ router.post('/wifi', requireAdmin, async (req, res) => {
   try {
     if (await refuseIfOrderInProgress(req, res, device_id)) return;
     publishWifiUpdate(device_id, ssid, password);
+    await logActivity({ device_id, source: 'admin', event: 'admin_wifi_update', detail: { ssid } });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1845,6 +1950,7 @@ router.post('/wifi-reset', requireAdmin, async (req, res) => {
   try {
     if (await refuseIfOrderInProgress(req, res, device_id)) return;
     publishWifiReset(device_id);
+    await logActivity({ device_id, source: 'admin', event: 'admin_wifi_reset' });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2071,21 +2177,23 @@ router.get('/orders', requireAdmin, async (req, res) => {
   }
 });
 
-router.post('/unlock', requireAdmin, (req, res) => {
+router.post('/unlock', requireAdmin, async (req, res) => {
   const device_id = DEVICE_ID();
   if (!isDeviceOnline(device_id)) return res.status(503).json({ error: 'Device is offline' });
   try {
     publishAdminUnlock(device_id);
+    await logActivity({ device_id, source: 'admin', event: 'admin_unlock' });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-router.post('/lock', requireAdmin, (req, res) => {
+router.post('/lock', requireAdmin, async (req, res) => {
   const device_id = DEVICE_ID();
   try {
     publishLock(device_id);
+    await logActivity({ device_id, source: 'admin', event: 'admin_lock' });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2098,15 +2206,27 @@ router.post('/reboot', requireAdmin, async (req, res) => {
   try {
     if (await refuseIfOrderInProgress(req, res, device_id)) return;
     publishReboot(device_id);
+    await logActivity({ device_id, source: 'admin', event: 'admin_reboot' });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+router.get('/orders/:order_id/activity', requireAdmin, async (req, res) => {
+  try {
+    res.json(await getOrderActivity(req.params.order_id));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// The order's activity rows are kept, so its history is still there to look
+// up after it's gone from the Orders list.
 router.delete('/orders/:order_id', requireAdmin, async (req, res) => {
   try {
     await deleteOrder(req.params.order_id);
+    await logActivity({ order_id: req.params.order_id, source: 'admin', event: 'order_deleted' });
     res.json({ ok: true });
   } catch (err) {
     res.status(404).json({ error: err.message });
@@ -2116,6 +2236,7 @@ router.delete('/orders/:order_id', requireAdmin, async (req, res) => {
 router.delete('/orders', requireAdmin, async (req, res) => {
   try {
     const count = await deleteAllOrders();
+    await logActivity({ source: 'admin', event: 'orders_cleared', detail: { count } });
     res.json({ ok: true, count });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2135,7 +2256,7 @@ router.post('/refund/:order_id', requireAdmin, async (req, res) => {
     // fall back to the pre-tax item sum only for orders that predate that
     // column being populated.
     const amount_cents = order.total_cents ?? order.items.reduce((sum, it) => sum + it.quantity * it.unit_price_cents, 0);
-    await createRefund({ payment_id: order.square_payment_id, order_id, amount_cents });
+    await createRefund({ payment_id: order.square_payment_id, order_id, amount_cents, reason: 'Refunded by store' });
     await updateOrder(order_id, { status: 'refunded' });
     res.json({ ok: true });
   } catch (err) {
@@ -2150,6 +2271,7 @@ router.post('/ota', requireAdmin, async (req, res) => {
   try {
     if (await refuseIfOrderInProgress(req, res, device_id)) return;
     publishOTA(device_id, url);
+    await logActivity({ device_id, source: 'admin', event: 'admin_ota', detail: { url } });
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

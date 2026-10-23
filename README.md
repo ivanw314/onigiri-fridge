@@ -99,7 +99,8 @@ Node.js/Express on Railway. HiveMQ Cloud (MQTT over TLS), Postgres, Square Payme
 | `src/db.js` | Shared Postgres connection pool |
 | `src/orderStore.js` | Orders + order_items (cart line items) CRUD, stats, Square-event dedup, SSE client registry |
 | `src/itemStore.js` | Items catalog + categories CRUD, atomic multi-item stock decrement/restore |
-| `src/mqttClient.js` | HiveMQ connection, HMAC command signing/publishing, device heartbeat + activity-event tracking |
+| `src/mqttClient.js` | HiveMQ connection, HMAC command signing/publishing, device heartbeat + online/offline tracking |
+| `src/activityLog.js` | `activity_log` table — permanent history of order steps, payments, refunds, admin actions and fridge events |
 | `src/square.js` | Square payment links, order lookup, refunds |
 | `src/routes/buy.js` | `GET /buy/:device_id` — multi-item storefront |
 | `src/routes/checkout.js` | `POST /api/checkout` — creates an order + Square payment link |
@@ -111,6 +112,8 @@ Node.js/Express on Railway. HiveMQ Cloud (MQTT over TLS), Postgres, Square Payme
 ### Order lifecycle
 
 `pending → paid → dispensing → complete`, or `→ timed_out` (60s unlock timeout, auto-refunded) / `→ refunded` (manual refund, or an error-path refund).
+
+Every step is also written to the `activity_log` table along with every event the fridge reports and every admin action, so what happened to an order (and who opened the fridge when) can be looked up later from the admin panel instead of the server logs. Its rows have no foreign key to `orders`, so deleting orders keeps their history.
 
 ### Items catalog & stock
 
@@ -129,9 +132,9 @@ Installable PWA, Bearer-token auth (`ADMIN_SECRET`), persistent login via localS
 
 - **Home** — today's revenue and items sold, a 7-day revenue bar chart (tap/hover a day for its numbers), today's sales per item, all-time totals (all computed from each order's snapshotted price, in the store time zone); Unlock / Lock; a "Needs restock" list of low (≤ 3) and out-of-stock items that jumps to the item; the 5 latest orders
 - **Items** — catalog grouped by category; each row has a −/+ stock stepper (taps are batched and sent as a relative change, so a sale in the meantime isn't overwritten) and an Edit form for name / category / price / full recount / delete; inactive items can be restored or deleted permanently. Below it, **Categories** — add, rename, reorder (↑/↓), delete the buy page's sections. Open edit forms survive the periodic refresh.
-- **Orders** — filter by All / Completed / In progress / Refunded / timed out, paged with Load more; each card shows status, the charged total, items and time, and expands to line items, tax, IDs, timestamps, and Refund / Delete
+- **Orders** — filter by All / Completed / In progress / Refunded / timed out, paged with Load more; each card shows status, the charged total, items and time, and expands to line items, tax, IDs, timestamps, a History timeline (checkout, payment, unlock, door, refund — e.g. whether a timed-out order was ever paid or unlocked), and Refund / Delete
 - **Insights** — for the last 7 days, 30 days or all time: revenue, orders, items sold, average order, items per order, refund rate (paid orders later refunded, kept separate from checkouts that were never paid); busiest hours and days of the week (weekdays averaged per occurrence, counted from the first sale); top items with share of units sold and the pairs most often bought together; and a restock forecast — each active item's average daily sales over the last 14 days and roughly how many days its current stock will last
-- **Device** — WiFi SSID/signal/firmware version, WiFi credential update, OTA firmware update by URL, store time zone, color-coded activity log, and a **Danger zone** (Reboot, WiFi factory reset with double-confirm, Clear all orders)
+- **Device** — WiFi SSID/signal/firmware version, WiFi credential update, OTA firmware update by URL, store time zone, a color-coded activity log (the latest 100 rows of `activity_log`, kept across restarts; admin actions in blue, each row tagged with its order), and a **Danger zone** (Reboot, WiFi factory reset with double-confirm, Clear all orders)
 
 Anything that restarts the controller (Reboot, WiFi update or reset, OTA) marks it offline the moment it announces the restart, so the buy page and checkout close until it reconnects instead of taking payments it can't unlock for. Those actions also ask for confirmation if a customer order is in progress (pending, paid or dispensing).
 
