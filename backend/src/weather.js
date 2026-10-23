@@ -1,4 +1,7 @@
 'use strict';
+const fs   = require('fs');
+const path = require('path');
+const zlib = require('zlib');
 const { pool } = require('./db');
 const { getSettings, setSetting } = require('./settingsStore');
 
@@ -64,10 +67,32 @@ function toF(q) {
   return q.unitCode && q.unitCode.endsWith('degF') ? q.value : q.value * 9 / 5 + 32;
 }
 
-// Looks the point up with NWS and saves it along with its forecast URL and
-// nearest station. Days are recorded per station, so moving to a different
-// one starts a fresh history without losing the old.
-async function setLocation(lat, lon) {
+// The middle of a ZIP code's area as [lat, lon], or null. From the Census
+// Bureau's 2024 Gazetteer of ZIP Code Tabulation Areas (public domain):
+// GEOID, INTPTLAT and INTPTLONG to 3 places, one "zip,lat,lon" per line,
+// gzipped. PO-box-only ZIPs aren't in it. Read only when a location is saved.
+function lookupZip(zip) {
+  const text = zlib.gunzipSync(fs.readFileSync(path.join(__dirname, '../data/zip-centroids.csv.gz'))).toString();
+  const m = text.match(new RegExp(`^${zip},(.+),(.+)$`, 'm'));
+  return m ? [Number(m[1]), Number(m[2])] : null;
+}
+
+function badInput(message) {
+  const err = new Error(message);
+  err.badInput = true;
+  return err;
+}
+
+// Takes { zip } or { lat, lon }. Looks the spot up with NWS and saves it
+// along with its forecast URL and nearest station. Days are recorded per
+// station, so moving to a different one starts a fresh history without
+// losing the old.
+async function setLocation({ zip = null, lat, lon }) {
+  if (zip) {
+    const point = lookupZip(zip);
+    if (!point) throw badInput(`Couldn't find ZIP code ${zip}. Try this phone's location instead.`);
+    [lat, lon] = point;
+  }
   // NWS redirects requests with more than 4 decimal places.
   lat = Math.round(lat * 1e4) / 1e4;
   lon = Math.round(lon * 1e4) / 1e4;
@@ -75,11 +100,7 @@ async function setLocation(lat, lon) {
   try {
     point = (await nws(`${NWS}/points/${lat},${lon}`)).properties;
   } catch (err) {
-    if (err.status === 404) {
-      const e = new Error('The National Weather Service has no data for that spot. It only covers the US.');
-      e.badInput = true;
-      throw e;
-    }
+    if (err.status === 404) throw badInput('The National Weather Service has no data for that spot. It only covers the US.');
     throw err;
   }
   const stations = (await nws(point.observationStations)).features.map((f) => f.properties);
@@ -89,7 +110,7 @@ async function setLocation(lat, lon) {
   if (!station) throw new Error('No weather station found near there');
   const place = point.relativeLocation?.properties;
   const location = {
-    lat, lon,
+    zip, lat, lon,
     place:        place ? `${place.city}, ${place.state}` : null,
     station:      station.stationIdentifier,
     station_name: station.name,
@@ -232,7 +253,7 @@ async function getWeatherInsights(location, timezone, closedDays) {
 
   const today = new Intl.DateTimeFormat('en-CA', { timeZone: timezone }).format(new Date());   // YYYY-MM-DD
   return {
-    location: { place: location.place, station: location.station, station_name: location.station_name },
+    location: { zip: location.zip || null, place: location.place, station: location.station, station_name: location.station_name },
     recorded_since: sinceQ.rows[0].since,
     rainy_hours: RAINY_HOURS,
     daytime: [DAYTIME_FROM, DAYTIME_TO],

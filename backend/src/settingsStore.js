@@ -22,8 +22,9 @@ const DEFAULTS = {
   // ISO weekdays (1 = Monday … 7 = Sunday) the fridge isn't in use. Insights
   // don't count them as days when averaging. Stored as e.g. "6,7".
   closed_days: [],
-  // Where the fridge is, for weather (see weather.js): lat, lon, place,
-  // station, station_name, forecast_url. Stored as JSON.
+  // Where the fridge is, for weather (see weather.js): zip (null when set
+  // from coordinates), lat, lon, place, station, station_name, forecast_url.
+  // Stored as JSON.
   weather_location: null,
 };
 

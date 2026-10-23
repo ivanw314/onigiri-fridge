@@ -242,9 +242,9 @@ router.get('/', (req, res) => {
     .wx-rain     { font-weight: 600; color: #1a5cbf; }
     .wx-rain.dry { font-weight: 500; color: #aaa; }
     #wxNote:empty { display: none; }
-    .wx-place  { font-weight: 600; font-size: 0.9rem; margin-bottom: 0.75rem; }
-    .wx-coords { display: flex; gap: 0.4rem; margin-top: 0.6rem; }
-    .wx-coords input { flex: 1; min-width: 0; margin: 0; }
+    .wx-place { font-weight: 600; font-size: 0.9rem; margin-bottom: 0.75rem; }
+    .wx-zip   { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; }
+    .wx-zip input { flex: 1; min-width: 0; margin: 0; }
 
     /* Orders */
     .chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.5rem; }
@@ -518,11 +518,11 @@ router.get('/', (req, res) => {
         <h2>Weather location</h2>
         <p class="status-sub" style="margin:-0.5rem 0 1rem">Where the fridge is, for weather from the National Weather Service (US only). Each finished day&rsquo;s weather is recorded from the nearest airport station.</p>
         <p class="wx-place" id="wxPlace">Not set</p>
-        <button class="secondary" id="wxHereBtn">&#x1F4CD; Use this phone&rsquo;s location</button>
-        <div class="wx-coords">
-          <input type="text" id="wxCoords" placeholder="Or paste: 47.6062, -122.3321" autocomplete="off">
+        <div class="wx-zip">
+          <input type="text" id="wxZip" inputmode="numeric" autocomplete="postal-code" placeholder="ZIP code, e.g. 98101" aria-label="ZIP code">
           <button class="sm-btn primary" id="wxSaveBtn">Save</button>
         </div>
+        <button class="secondary" id="wxHereBtn">&#x1F4CD; Or use this phone&rsquo;s location</button>
         <p class="msg" id="wxMsg"></p>
       </div>
     </section>
@@ -1183,7 +1183,8 @@ router.get('/', (req, res) => {
       return;
     }
     document.getElementById('wxPlace').textContent =
-      (w.location.place ? w.location.place + ' · ' : '') + w.location.station_name + ' (' + w.location.station + ')';
+      (w.location.zip ? w.location.zip + ' · ' : '') + (w.location.place ? w.location.place + ' · ' : '') +
+      w.location.station_name + ' (' + w.location.station + ')';
 
     var dry = w.rain.dry;
     var wet = w.rain.wet;
@@ -1254,13 +1255,14 @@ router.get('/', (req, res) => {
   var wxMsg     = document.getElementById('wxMsg');
   var wxHereBtn = document.getElementById('wxHereBtn');
   var wxSaveBtn = document.getElementById('wxSaveBtn');
-  var wxCoords  = document.getElementById('wxCoords');
+  var wxZip     = document.getElementById('wxZip');
 
-  function saveWeatherLocation(lat, lon) {
+  // where: { zip } or { lat, lon }
+  function saveWeatherLocation(where) {
     wxHereBtn.disabled = wxSaveBtn.disabled = true;
     flashMsg(wxMsg, 'msg', 'Looking that up with the National Weather Service…', 0);
-    api('PUT', '/admin/weather/location', { lat: lat, lon: lon }).then(function(d) {
-      wxCoords.value = '';
+    api('PUT', '/admin/weather/location', where).then(function(d) {
+      wxZip.value = '';
       flashMsg(wxMsg, 'msg ok', 'Saved' + (d.location.place ? ': ' + d.location.place : '') + '. Recording the past week’s weather now.', 6000);
       refreshInsights();
       setTimeout(refreshInsights, 15000);   // by then the past week is usually in
@@ -1275,18 +1277,23 @@ router.get('/', (req, res) => {
     if (!navigator.geolocation) { flashMsg(wxMsg, 'msg err', 'This browser can’t share its location. Paste coordinates instead.', 6000); return; }
     flashMsg(wxMsg, 'msg', 'Finding this phone…', 0);
     navigator.geolocation.getCurrentPosition(function(pos) {
-      saveWeatherLocation(pos.coords.latitude, pos.coords.longitude);
+      saveWeatherLocation({ lat: pos.coords.latitude, lon: pos.coords.longitude });
     }, function(err) {
-      flashMsg(wxMsg, 'msg err', (err.code === 1 ? 'Location access was turned down.' : 'Couldn’t find this phone.') + ' Paste coordinates instead.', 8000);
+      flashMsg(wxMsg, 'msg err', (err.code === 1 ? 'Location access was turned down.' : 'Couldn’t find this phone.') + ' Enter the ZIP code instead.', 8000);
     }, { timeout: 15000, maximumAge: 60000 });
   });
 
-  // Takes "lat, lon" as copied from a map app.
-  wxSaveBtn.addEventListener('click', function() {
-    var m = wxCoords.value.match(/(-?\\d+(?:\\.\\d+)?)\\s*[,\\s]\\s*(-?\\d+(?:\\.\\d+)?)/);
-    if (!m) { flashMsg(wxMsg, 'msg err', 'Enter a latitude and longitude, like 47.6062, -122.3321.', 6000); return; }
-    saveWeatherLocation(parseFloat(m[1]), parseFloat(m[2]));
-  });
+  // A ZIP (ZIP+4 is fine), or "lat, lon" pasted from a map app.
+  function saveTypedLocation() {
+    var v      = wxZip.value.trim();
+    var zip    = v.match(/^(\\d{5})(-\\d{4})?$/);
+    var coords = v.match(/^(-?\\d+(?:\\.\\d+)?)\\s*[,\\s]\\s*(-?\\d+(?:\\.\\d+)?)$/);
+    if (zip)         saveWeatherLocation({ zip: zip[1] });
+    else if (coords) saveWeatherLocation({ lat: parseFloat(coords[1]), lon: parseFloat(coords[2]) });
+    else flashMsg(wxMsg, 'msg err', 'Enter a 5-digit ZIP code.', 6000);
+  }
+  wxSaveBtn.addEventListener('click', saveTypedLocation);
+  wxZip.addEventListener('keydown', function(e) { if (e.key === 'Enter') saveTypedLocation(); });
 
   // ── Orders ──────────────────────────────────────────────────────────────────
 
@@ -2285,14 +2292,16 @@ router.get('/insights', requireAdmin, async (req, res) => {
   }
 });
 
-// Sets where the fridge is for weather. Looked up with the National Weather
-// Service before saving, so a spot it doesn't cover is refused.
+// Sets where the fridge is for weather, from { zip } or { lat, lon }. Looked
+// up with the National Weather Service before saving, so a spot it doesn't
+// cover is refused.
 router.put('/weather/location', requireAdmin, async (req, res) => {
-  const { lat, lon } = req.body || {};
-  if (typeof lat !== 'number' || typeof lon !== 'number' || Math.abs(lat) > 90 || Math.abs(lon) > 180)
-    return res.status(400).json({ error: 'lat and lon must be numbers' });
+  const { zip, lat, lon } = req.body || {};
+  if (zip !== undefined ? typeof zip !== 'string' || !/^\d{5}$/.test(zip)
+      : typeof lat !== 'number' || typeof lon !== 'number' || Math.abs(lat) > 90 || Math.abs(lon) > 180)
+    return res.status(400).json({ error: 'Send a 5-digit zip, or lat and lon as numbers' });
   try {
-    res.json({ location: await setLocation(lat, lon) });
+    res.json({ location: await setLocation(zip !== undefined ? { zip } : { lat, lon }) });
   } catch (err) {
     res.status(err.badInput ? 400 : 502).json({ error: err.message });
   }
